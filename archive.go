@@ -11,9 +11,9 @@ import (
 	"strings"
 )
 
-// extractPackage extracts every file beside the requested executable. Modern
-// llama.cpp executables are small launchers whose implementation and build
-// metadata live in adjacent DLLs, so replacing only the exe is not sufficient.
+// extractPackage 提取所请求的可执行文件及其所在目录下的所有文件。
+// 现代的 llama.cpp 可执行文件只是小型的启动器，其具体实现和构建元数据
+// 都存在于同目录的 DLL 文件中，因此仅替换 exe 文件是不够的。
 func extractPackage(archivePath, destDir string, targetNames []string) (string, error) {
 	lower := strings.ToLower(archivePath)
 	switch {
@@ -188,6 +188,7 @@ func replacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 			if hadBackup {
 				_ = os.Rename(filepath.Join(backupDir, name), dst)
 			}
+			os.Remove(tempPath)
 			rollback()
 			return err
 		}

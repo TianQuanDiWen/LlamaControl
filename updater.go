@@ -24,11 +24,12 @@ type githubAsset struct {
 }
 
 type managedApp struct {
-	Name       string
-	Repo       string
-	BinaryBase string
-	Parse      func(string) string
-	Variant    func(string, string) string
+	Name          string
+	Repo          string
+	BinaryBase    string
+	Parse         func(string) string
+	Variant       func(string, string) string
+	NewestRelease bool
 }
 
 type appStatus struct {
@@ -41,7 +42,7 @@ type appStatus struct {
 }
 
 var managedApps = []managedApp{
-	{Name: "llama.cpp", Repo: "ggml-org/llama.cpp", BinaryBase: "llama-server", Parse: extractLlamaCppVersion, Variant: detectLlamaCppVariant},
+	{Name: "llama.cpp", Repo: "ggml-org/llama.cpp", BinaryBase: "llama-server", Parse: extractLlamaCppVersion, Variant: detectLlamaCppVariant, NewestRelease: true},
 	{Name: "llama-swap", Repo: "mostlygeek/llama-swap", BinaryBase: "llama-swap", Parse: extractLlamaSwapVersion},
 }
 
@@ -114,7 +115,7 @@ func inspectApp(app managedApp) appStatus {
 	if status.Path == "" {
 		return status
 	}
-	status.Release, status.CheckErr = fetchLatestRelease(app.Repo)
+	status.Release, status.CheckErr = fetchLatestRelease(app)
 	return status
 }
 
@@ -219,8 +220,15 @@ func executableDir() string {
 	return dir
 }
 
-func fetchLatestRelease(repo string) (githubRelease, error) {
-	url := "https://api.github.com/repos/" + repo + "/releases/latest"
+func fetchLatestRelease(app managedApp) (githubRelease, error) {
+	endpoint := "/releases/latest"
+	if app.NewestRelease {
+		// GitHub 的 /releases/latest 端点会刻意排除预发布版本 (pre-releases)。
+		// 这里改为获取最新发布的 llama.cpp 版本，无论其标签是稳定版、
+		// 构建号，还是未来的其他标签格式。
+		endpoint = "/releases?per_page=1"
+	}
+	url := "https://api.github.com/repos/" + app.Repo + endpoint
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return githubRelease{}, err
@@ -237,7 +245,15 @@ func fetchLatestRelease(repo string) (githubRelease, error) {
 		return githubRelease{}, fmt.Errorf("GitHub API 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if app.NewestRelease {
+		var releases []githubRelease
+		if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+			return githubRelease{}, err
+		}
+		if len(releases) > 0 {
+			release = releases[0]
+		}
+	} else if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return githubRelease{}, err
 	}
 	if strings.TrimSpace(release.TagName) == "" {
@@ -253,10 +269,10 @@ func installRelease(status appStatus) error {
 	}
 	dir := filepath.Dir(status.Path)
 	downloadPath := filepath.Join(dir, "_update_"+filepath.Base(asset.Name))
+	defer os.Remove(downloadPath)
 	if err := downloadWithProgress(asset.URL, downloadPath); err != nil {
 		return err
 	}
-	defer os.Remove(downloadPath)
 	unpackDir, err := os.MkdirTemp(dir, "_update_unpack_")
 	if err != nil {
 		return err
@@ -299,8 +315,11 @@ func assetScore(name string, app managedApp, variant, goos, goarch string) int {
 	if strings.Contains(name, strings.ToLower(app.BinaryBase)) || strings.Contains(name, strings.ToLower(app.Name)) {
 		score += 4
 	}
-	osTokens := map[string][]string{"windows": {"windows", "win"}, "darwin": {"macos", "darwin", "osx"}}
+	osTokens := map[string][]string{"windows": {"windows", "win"}, "darwin": {"macos", "darwin", "osx"}, "linux": {"linux", "ubuntu"}}
 	if !containsAny(name, osTokens[goos]...) {
+		return -1
+	}
+	if goos == "windows" && strings.Contains(name, "darwin") {
 		return -1
 	}
 	score += 5
