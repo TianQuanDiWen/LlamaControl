@@ -11,7 +11,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$projectRoot = $PSScriptRoot
+$scriptDir = $PSScriptRoot
+$projectRoot = if (Test-Path (Join-Path $scriptDir "go.mod")) { $scriptDir } else { (Split-Path -Parent $scriptDir) }
 $outputRoot = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
     [System.IO.Path]::GetFullPath($OutputDir)
 } else {
@@ -49,7 +50,7 @@ try {
         $env:CGO_ENABLED = '0'
 
         Write-Host "Building Windows/$Arch..."
-        & go build -trimpath -ldflags '-s -w' -o $exePath .
+        & go build -trimpath -ldflags '-s -w' -o $exePath ./cmd/llama-control
         if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 
         Copy-Item -LiteralPath $exePath -Destination (Join-Path $stageDir 'llama-control.exe')

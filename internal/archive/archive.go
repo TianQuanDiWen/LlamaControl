@@ -1,4 +1,4 @@
-package main
+package archive
 
 import (
 	"archive/tar"
@@ -11,26 +11,25 @@ import (
 	"strings"
 )
 
-// extractPackage 提取所请求的可执行文件及其所在目录下的所有文件。
-// 现代的 llama.cpp 可执行文件只是小型的启动器，其具体实现和构建元数据
-// 都存在于同目录的 DLL 文件中，因此仅替换 exe 文件是不够的。
-func extractPackage(archivePath, destDir string, targetNames []string) (string, error) {
+// ExtractPackage 根据文件后缀名自动选择解压策略，将目标可执行文件及其同目录下的所有依赖文件解压到目标文件夹
+func ExtractPackage(archivePath, destDir string, targetNames []string) (string, error) {
 	lower := strings.ToLower(archivePath)
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
-		return extractZipPackage(archivePath, destDir, targetNames)
+		return ExtractZipPackage(archivePath, destDir, targetNames)
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
-		return extractTarPackage(archivePath, destDir, targetNames)
+		return ExtractTarPackage(archivePath, destDir, targetNames)
 	default:
 		target := filepath.Join(destDir, targetNames[0])
-		if err := copyFile(archivePath, target); err != nil {
+		if err := CopyFile(archivePath, target); err != nil {
 			return "", err
 		}
 		return target, nil
 	}
 }
 
-func extractZipPackage(archivePath, destDir string, targetNames []string) (string, error) {
+// ExtractZipPackage 处理 .zip 压缩包：在包中搜寻目标可执行文件所在的路径，并将该路径下的所有文件解压出来
+func ExtractZipPackage(archivePath, destDir string, targetNames []string) (string, error) {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", err
@@ -60,7 +59,7 @@ func extractZipPackage(archivePath, destDir string, targetNames []string) (strin
 		if err != nil {
 			return "", err
 		}
-		err = writeReader(filepath.Join(destDir, filepath.Base(name)), in, file.Mode())
+		err = WriteReader(filepath.Join(destDir, filepath.Base(name)), in, file.Mode())
 		in.Close()
 		if err != nil {
 			return "", err
@@ -69,7 +68,8 @@ func extractZipPackage(archivePath, destDir string, targetNames []string) (strin
 	return filepath.Join(destDir, targetBase), nil
 }
 
-func extractTarPackage(archivePath, destDir string, targetNames []string) (string, error) {
+// ExtractTarPackage 处理 .tar.gz 压缩包：在包中搜寻目标可执行文件所在的路径，并将该路径下的所有文件解压出来
+func ExtractTarPackage(archivePath, destDir string, targetNames []string) (string, error) {
 	targetDir, targetBase, err := findTarTarget(archivePath, targetNames)
 	if err != nil {
 		return "", err
@@ -92,13 +92,14 @@ func extractTarPackage(archivePath, destDir string, targetNames []string) (strin
 		if header.Typeflag != tar.TypeReg || filepath.ToSlash(filepath.Dir(name)) != targetDir {
 			continue
 		}
-		if err := writeReader(filepath.Join(destDir, filepath.Base(name)), tarReader, os.FileMode(header.Mode)); err != nil {
+		if err := WriteReader(filepath.Join(destDir, filepath.Base(name)), tarReader, os.FileMode(header.Mode)); err != nil {
 			return "", err
 		}
 	}
 	return filepath.Join(destDir, targetBase), nil
 }
 
+// findTarTarget 辅助方法：快速扫描 tar 包找到包含目标二进制文件的内部文件夹路径
 func findTarTarget(path string, targetNames []string) (string, string, error) {
 	file, gz, reader, err := openTarGz(path)
 	if err != nil {
@@ -126,6 +127,7 @@ func findTarTarget(path string, targetNames []string) (string, string, error) {
 	return "", "", fmt.Errorf("压缩包中未找到目标程序 %s", strings.Join(targetNames, "/"))
 }
 
+// openTarGz 辅助方法：开启文件并初始化 gzip 以及 tar 读取器
 func openTarGz(path string) (*os.File, *gzip.Reader, *tar.Reader, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -139,7 +141,41 @@ func openTarGz(path string) (*os.File, *gzip.Reader, *tar.Reader, error) {
 	return file, gz, tar.NewReader(gz), nil
 }
 
-func replacePackageSafely(srcDir, dstDir, executable string, verify func(string) error) error {
+// WriteReader 从一个 io.Reader 流中将数据写入到指定的文件路径中
+func WriteReader(path string, reader io.Reader, mode os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(file, reader)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+// CopyFile 将指定的源文件完整复制到目标位置
+func CopyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+// ReplacePackageSafely 事务性原子替换目标目录下的程序及其依赖动态库，若验证失败自动回滚
+func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string) error) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		return err
@@ -170,7 +206,7 @@ func replacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		}
 		tempPath := temp.Name()
 		temp.Close()
-		if err := copyFile(src, tempPath); err != nil {
+		if err := CopyFile(src, tempPath); err != nil {
 			os.Remove(tempPath)
 			rollback()
 			return err
@@ -199,35 +235,4 @@ func replacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		return err
 	}
 	return nil
-}
-
-func writeReader(path string, reader io.Reader, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(file, reader)
-	closeErr := file.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
 }

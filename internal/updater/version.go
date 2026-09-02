@@ -1,4 +1,4 @@
-package main
+package updater
 
 import (
 	"path/filepath"
@@ -19,7 +19,8 @@ var (
 	numberPattern          = regexp.MustCompile(`\d+`)
 )
 
-func extractLlamaCppVersion(text string) string {
+// ExtractLlamaCppVersion 从输出文本中提取 llama.cpp 的 bXXXX 构建版本号
+func ExtractLlamaCppVersion(text string) string {
 	for _, pattern := range llamaBuildPatterns {
 		if match := pattern.FindStringSubmatch(text); len(match) > 1 {
 			return "b" + match[1]
@@ -28,16 +29,16 @@ func extractLlamaCppVersion(text string) string {
 	return ""
 }
 
-func extractLlamaCppBuildVersion(text string) string { return extractLlamaCppVersion(text) }
-
-func extractLlamaSwapVersion(text string) string {
+// ExtractLlamaSwapVersion 从输出文本中提取 llama-swap 的版本号
+func ExtractLlamaSwapVersion(text string) string {
 	if match := llamaSwapPattern.FindStringSubmatch(text); len(match) > 1 {
 		return match[1]
 	}
 	return ""
 }
 
-func versionFromFilename(path string) string {
+// VersionFromFilename 从文件名中尝试提取版本号
+func VersionFromFilename(path string) string {
 	match := filenameVersionPattern.FindStringSubmatch(strings.ToLower(filepath.Base(path)))
 	if len(match) == 0 {
 		return ""
@@ -50,8 +51,10 @@ func versionFromFilename(path string) string {
 	return ""
 }
 
-func compareVersions(local, remote string) int {
-	a, b := versionNumbers(local), versionNumbers(remote)
+// CompareVersions 比较两个多段数字或构建版本号
+// 返回 -1 (local < remote), 0 (local == remote), 1 (local > remote)
+func CompareVersions(local, remote string) int {
+	a, b := VersionNumbers(local), VersionNumbers(remote)
 	for i := 0; i < max(len(a), len(b)); i++ {
 		av, bv := 0, 0
 		if i < len(a) {
@@ -70,9 +73,8 @@ func compareVersions(local, remote string) int {
 	return 0
 }
 
-func compareVersionStrings(local, remote string) int { return compareVersions(local, remote) }
-
-func versionNumbers(value string) []int {
+// VersionNumbers 提取字符串中的所有连续整型数字段
+func VersionNumbers(value string) []int {
 	matches := numberPattern.FindAllString(value, -1)
 	numbers := make([]int, 0, len(matches))
 	for _, match := range matches {
@@ -81,37 +83,4 @@ func versionNumbers(value string) []int {
 		}
 	}
 	return numbers
-}
-
-func detectLlamaCppVariant(path, output string) string {
-	text := strings.ToLower(path + "\n" + output)
-	switch {
-	case containsAny(text, "cuda 13", "cuda13", "cuda-13"):
-		return "cuda13"
-	case containsAny(text, "cuda 12", "cuda12", "cuda-12"):
-		return "cuda12"
-	case installedCUDAVariant() != "":
-		return installedCUDAVariant()
-	case strings.Contains(text, "vulkan"):
-		return "vulkan"
-	case strings.Contains(text, "metal"):
-		return "metal"
-	default:
-		return ""
-	}
-}
-
-func formatVariant(variant string) string {
-	switch strings.ToLower(variant) {
-	case "cuda13":
-		return "CUDA 13"
-	case "cuda12":
-		return "CUDA 12"
-	case "vulkan":
-		return "Vulkan"
-	case "metal":
-		return "Metal"
-	default:
-		return variant
-	}
 }
