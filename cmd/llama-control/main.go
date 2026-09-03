@@ -26,7 +26,11 @@ func init() {
 }
 
 func main() {
+	if platform.HandleServiceWorker(serviceName) {
+		return
+	}
 	flag.Parse()
+
 	platform.ConfigureConsole()
 	if !platform.IsSupported() {
 		fmt.Printf("当前系统平台 (%s) 暂未完全支持服务管理；更新核心已支持扩展该平台。\n", platform.PlatformName())
@@ -54,8 +58,9 @@ func showMenu() {
 		fmt.Println("  [4] 查看状态")
 		fmt.Println("  [5] 清理日志")
 		fmt.Println("  [6] 检查并更新 llama.cpp / llama-swap")
+		fmt.Println("  [7] 注册/卸载系统服务")
 		fmt.Println("  [0] 退出")
-		fmt.Print("\n请选择操作 (0-6): ")
+		fmt.Print("\n请选择操作 (0-7): ")
 		choice, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Println("读取输入失败:", err)
@@ -74,6 +79,8 @@ func showMenu() {
 			cleanLogs()
 		case "6":
 			updater.UpdateManagedApps(reader, serviceName)
+		case "7":
+			manageService(reader)
 		case "0":
 			return
 		default:
@@ -145,6 +152,24 @@ func cleanLogs() {
 	if err := platform.CleanLogs(logDir); err != nil {
 		fmt.Println("清理日志失败:", err)
 	}
+	waitForEnter()
+}
+
+// manageService 委派底层平台抽象层处理系统服务的查询、注销与注册流程
+func manageService(reader *bufio.Reader) {
+	platform.ManageService(reader, serviceName, func() (string, string, int) {
+		var swapPath string
+		for _, app := range updater.ManagedApps {
+			if app.Name == "llama-swap" {
+				swapPath, _, _ = updater.InspectLocalBinary(app)
+				break
+			}
+		}
+		if swapPath == "" {
+			return "", "", 0
+		}
+		return swapPath, filepath.Dir(swapPath), detectSwapPort()
+	})
 	waitForEnter()
 }
 

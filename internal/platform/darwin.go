@@ -3,6 +3,8 @@
 package platform
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,8 +61,7 @@ func RestartService(name string) error {
 // ServiceStatus 查询 macOS 守护服务的当前运行状态
 func ServiceStatus(name string) (string, error) {
 	if _, err := exec.LookPath("brew"); err == nil {
-		out, err := CommandOutput("brew", "services", "info", name, "--json")
-		if err == nil {
+		if _, err := CommandOutput("brew", "services", "info", name, "--json"); err == nil {
 			return "Managed by brew", nil
 		}
 	}
@@ -144,3 +145,15 @@ func InstalledCUDAVariant() string         { return "" }
 
 // ExecutableNames 根据基础程序名称展开出附带特定扩展名的实际可执行文件全名
 func ExecutableNames(base string) []string { return []string{base} }
+
+// ---- 原生服务管理 (macOS 待实现/Launchd) ----
+
+func RegisterService(name, displayName, exePath string, args ...string) error { return fmt.Errorf("服务注册功能当前仅适用于 Windows") }
+func UninstallService(string) error                                               { return fmt.Errorf("服务注销功能当前仅适用于 Windows") }
+func RunAsService(serviceName string, runFn func(ctx context.Context) error) error { return fmt.Errorf("服务守护功能当前仅适用于 Windows") }
+func HandleServiceWorker(serviceName string) bool                                 { return false }
+func ManageService(reader *bufio.Reader, serviceName string, getAppInfo func() (swapPath, appDir string, port int)) {
+	fmt.Println("macOS 平台的 launchd 服务管理功能正在开发中，敬请期待。")
+}
+
+

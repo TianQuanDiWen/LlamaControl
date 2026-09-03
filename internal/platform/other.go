@@ -3,6 +3,8 @@
 package platform
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,3 +66,15 @@ func InstalledCUDAVariant() string         { return "" }
 
 // ExecutableNames 根据基础程序名称展开出附带特定扩展名的实际可执行文件全名
 func ExecutableNames(base string) []string { return []string{base} }
+
+// ---- 原生服务管理 (当前平台未实现) ----
+
+func RegisterService(name, displayName, exePath string, args ...string) error { return unsupported() }
+func UninstallService(string) error                                               { return unsupported() }
+func RunAsService(serviceName string, runFn func(ctx context.Context) error) error { return unsupported() }
+func HandleServiceWorker(serviceName string) bool                                 { return false }
+func ManageService(reader *bufio.Reader, serviceName string, getAppInfo func() (swapPath, appDir string, port int)) {
+	fmt.Println("当前平台暂未实现系统服务管理功能。")
+}
+
+
