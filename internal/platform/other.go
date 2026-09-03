@@ -39,8 +39,6 @@ func ServiceStatus(string) (string, error) { return "", unsupported() }
 func ServiceRunning(string) (bool, error)  { return false, unsupported() }
 // PortListening 检查指定的 TCP 本地端口是否监听 (占位)
 func PortListening(int) (bool, error)      { return false, unsupported() }
-// CleanLogs 自动清理陈旧的日志文件 (占位)
-func CleanLogs(string) error                     { return unsupported() }
 
 // SearchPath 在系统 PATH 环境变量中搜索给定的可执行文件名称
 func SearchPath(name string) ([]string, error) {

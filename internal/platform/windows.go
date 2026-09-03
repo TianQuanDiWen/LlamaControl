@@ -16,6 +16,8 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"llama-control/internal/fsutil"
 )
 
 // IsSupported 判断当前平台是否完全支持服务及管理操作
@@ -75,36 +77,7 @@ func PortListening(port int) (bool, error) {
 	return strings.EqualFold(out, "true"), err
 }
 
-// CleanLogs 删除指定目录下 7 天前的过期日志文件
-func CleanLogs(logDir string) error {
-	info, err := os.Stat(logDir)
-	if err != nil || !info.IsDir() {
-		fmt.Printf("[WARN] 日志目录不存在: %s\n", logDir)
-		return nil
-	}
-	cutoff := time.Now().AddDate(0, 0, -7)
-	entries, err := os.ReadDir(logDir)
-	if err != nil {
-		return err
-	}
-	deletedCount := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(filepath.Join(logDir, entry.Name())); err == nil {
-				deletedCount++
-			}
-		}
-	}
-	fmt.Printf("[OK] 清理完成。已删除 %d 个日志文件。\n", deletedCount)
-	return nil
-}
+
 
 // SearchPath 在系统 PATH 环境变量中搜索给定的可执行文件名称，返回所有匹配项的绝对路径
 func SearchPath(name string) ([]string, error) {
@@ -369,11 +342,8 @@ func runServiceWorker(serviceName string) {
 
 		logDir := filepath.Join(appDir, "logs")
 		_ = os.MkdirAll(logDir, 0755)
-		logFile, err := os.OpenFile(filepath.Join(logDir, "swap.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return err
-		}
-		defer logFile.Close()
+		dailyLogger := &fsutil.DailyLogWriter{Dir: logDir, Prefix: "swap"}
+		defer dailyLogger.Close()
 
 		port := 8080
 		for _, name := range []string{"config.yaml", "config.yml"} {
@@ -403,8 +373,8 @@ func runServiceWorker(serviceName string) {
 
 			cmd := exec.CommandContext(ctx, swapPath, "-config", "config.yaml", "-listen", fmt.Sprintf(":%d", port))
 			cmd.Dir = appDir
-			cmd.Stdout = logFile
-			cmd.Stderr = logFile
+			cmd.Stdout = dailyLogger
+			cmd.Stderr = dailyLogger
 
 			_ = cmd.Run()
 

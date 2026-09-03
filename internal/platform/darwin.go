@@ -90,36 +90,7 @@ func PortListening(port int) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// CleanLogs 删除指定目录下 7 天前的过期日志文件
-func CleanLogs(logDir string) error {
-	info, err := os.Stat(logDir)
-	if err != nil || !info.IsDir() {
-		fmt.Printf("[INFO] 日志目录不存在: %s\n", logDir)
-		return nil
-	}
-	cutoff := time.Now().AddDate(0, 0, -7)
-	entries, err := os.ReadDir(logDir)
-	if err != nil {
-		return err
-	}
-	deletedCount := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(filepath.Join(logDir, entry.Name())); err == nil {
-				deletedCount++
-			}
-		}
-	}
-	fmt.Printf("[OK] 清理完成。已删除 %d 个日志文件。\n", deletedCount)
-	return nil
-}
+
 
 // SearchPath 在系统 PATH 环境变量中搜索给定的可执行文件名称，返回绝对路径
 func SearchPath(name string) ([]string, error) {

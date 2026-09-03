@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"llama-control/internal/archive"
+	"llama-control/internal/fsutil"
 	"llama-control/internal/platform"
 )
 
@@ -327,12 +327,12 @@ func InstallRelease(status AppStatus) error {
 	if err := os.Mkdir(unpackDir, 0755); err != nil {
 		return err
 	}
-	updated, err := archive.ExtractPackage(downloadPath, unpackDir, platform.ExecutableNames(status.App.BinaryBase))
+	updated, err := fsutil.ExtractPackage(downloadPath, unpackDir, platform.ExecutableNames(status.App.BinaryBase))
 	if err != nil {
 		return err
 	}
 	fmt.Println("  资源:", asset.Name)
-	return archive.ReplacePackageSafely(filepath.Dir(updated), filepath.Dir(status.Path), filepath.Base(updated), func(path string) error {
+	return fsutil.ReplacePackageSafely(filepath.Dir(updated), filepath.Dir(status.Path), filepath.Base(updated), func(path string) error {
 		v := status.App.Parse(BinaryVersionOutput(path))
 		if v == "" {
 			return fmt.Errorf("更新后无法读取版本")

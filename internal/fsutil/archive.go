@@ -1,4 +1,4 @@
-package archive
+package fsutil
 
 import (
 	"archive/tar"
@@ -24,6 +24,7 @@ func ExtractPackage(archivePath, destDir string, targetNames []string) (string, 
 		if err := CopyFile(archivePath, target); err != nil {
 			return "", err
 		}
+		_ = os.Chmod(target, 0755)
 		return target, nil
 	}
 }
@@ -59,7 +60,11 @@ func ExtractZipPackage(archivePath, destDir string, targetNames []string) (strin
 		if err != nil {
 			return "", err
 		}
-		err = WriteReader(filepath.Join(destDir, filepath.Base(name)), in, file.Mode())
+		mode := file.Mode()
+		if isTarget(name, targetNames) {
+			mode = mode | 0755
+		}
+		err = WriteReader(filepath.Join(destDir, filepath.Base(name)), in, mode)
 		in.Close()
 		if err != nil {
 			return "", err
@@ -92,7 +97,11 @@ func ExtractTarPackage(archivePath, destDir string, targetNames []string) (strin
 		if header.Typeflag != tar.TypeReg || filepath.ToSlash(filepath.Dir(name)) != targetDir {
 			continue
 		}
-		if err := WriteReader(filepath.Join(destDir, filepath.Base(name)), tarReader, os.FileMode(header.Mode)); err != nil {
+		mode := os.FileMode(header.Mode)
+		if isTarget(name, targetNames) {
+			mode = mode | 0755
+		}
+		if err := WriteReader(filepath.Join(destDir, filepath.Base(name)), tarReader, mode); err != nil {
 			return "", err
 		}
 	}
@@ -141,9 +150,13 @@ func openTarGz(path string) (*os.File, *gzip.Reader, *tar.Reader, error) {
 	return file, gz, tar.NewReader(gz), nil
 }
 
-// WriteReader 从一个 io.Reader 流中将数据写入到指定的文件路径中
+// WriteReader 从一个 io.Reader 流中将数据写入到指定的文件路径中，并确保 POSIX 权限位生效
 func WriteReader(path string, reader io.Reader, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	perm := mode.Perm()
+	if perm == 0 {
+		perm = 0644
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
@@ -152,17 +165,27 @@ func WriteReader(path string, reader io.Reader, mode os.FileMode) error {
 	if copyErr != nil {
 		return copyErr
 	}
-	return closeErr
+	if closeErr != nil {
+		return closeErr
+	}
+	_ = os.Chmod(path, perm)
+	return nil
 }
 
-// CopyFile 将指定的源文件完整复制到目标位置
+// CopyFile 将指定的源文件完整复制到目标位置，并完整保留源文件的权限位
 func CopyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -171,7 +194,11 @@ func CopyFile(src, dst string) error {
 	if copyErr != nil {
 		return copyErr
 	}
-	return closeErr
+	if closeErr != nil {
+		return closeErr
+	}
+	_ = os.Chmod(dst, info.Mode().Perm())
+	return nil
 }
 
 // ReplacePackageSafely 事务性原子替换目标目录下的程序及其依赖动态库，若验证失败自动回滚
@@ -230,9 +257,27 @@ func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		}
 		installed = append(installed, name)
 	}
-	if err := verify(filepath.Join(dstDir, executable)); err != nil {
+
+	// 确保目标可执行文件在 Unix/macOS 下拥有执行权限 (0755)
+	targetExe := filepath.Join(dstDir, executable)
+	if info, err := os.Stat(targetExe); err == nil {
+		_ = os.Chmod(targetExe, info.Mode()|0755)
+	}
+
+	if err := verify(targetExe); err != nil {
 		rollback()
 		return err
 	}
 	return nil
+}
+
+// isTarget 辅助判断文件名是否命中预期的可执行文件候选列表
+func isTarget(path string, targetNames []string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	for _, target := range targetNames {
+		if strings.EqualFold(base, target) {
+			return true
+		}
+	}
+	return false
 }

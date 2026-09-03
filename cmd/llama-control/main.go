@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"llama-control/internal/config"
+	"llama-control/internal/fsutil"
 	"llama-control/internal/platform"
 	"llama-control/internal/updater"
 )
@@ -149,7 +150,7 @@ func cleanLogs() {
 		logDir = filepath.Join(exeDir, "logs")
 		fmt.Printf("未配置日志路径，使用默认本地路径: %s\n", logDir)
 	}
-	if err := platform.CleanLogs(logDir); err != nil {
+	if err := fsutil.CleanLogs(logDir); err != nil {
 		fmt.Println("清理日志失败:", err)
 	}
 	waitForEnter()
