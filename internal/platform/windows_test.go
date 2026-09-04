@@ -57,3 +57,26 @@ func TestInstalledCUDAVariant(t *testing.T) {
 		t.Errorf("Expected empty string for invalid path, got %s", variant)
 	}
 }
+
+func TestSearchPathParsing(t *testing.T) {
+	// 模拟 where 命令输出的字符串，包括带空格的路径和多余的空行
+	mockOut := "C:\\Program Files\\llama\\llama-server.exe\nC:\\local tools\\llama-server.exe\n\n"
+	
+	var paths []string
+	for _, line := range strings.Split(mockOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d", len(paths))
+	}
+	if paths[0] != "C:\\Program Files\\llama\\llama-server.exe" {
+		t.Errorf("unexpected path 0: %s", paths[0])
+	}
+	if paths[1] != "C:\\local tools\\llama-server.exe" {
+		t.Errorf("unexpected path 1: %s", paths[1])
+	}
+}

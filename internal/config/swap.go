@@ -5,15 +5,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 var (
-	portPattern   = regexp.MustCompile(`(?im)^\s*port\s*:\s*"?(\d+)"?`)
-	listenPattern = regexp.MustCompile(`(?im)^\s*listen\s*:\s*"?.*?:(\d+)"?`)
+	portPattern   = regexp.MustCompile(`(?im)^\s*port\s*:\s*"?(\d+)"?\s*(?:#.*)?$`)
+	listenPattern = regexp.MustCompile(`(?im)^\s*listen\s*:\s*"?.*?:(\d+)"?\s*(?:#.*)?$`)
 	
-	// 匹配 YAML 中常见的日志路径配置，如 log_dir, log-dir, log_file, log
-	logDirPattern  = regexp.MustCompile(`(?im)^\s*log(?:_|-)?dir\s*:\s*"?([^"\r\n]+)"?`)
-	logFilePattern = regexp.MustCompile(`(?im)^\s*log(?:(?:_|-)?(?:file|path))?\s*:\s*"?([^"\r\n]+)"?`)
+	// 匹配 YAML 中常见的日志路径配置，如 log_dir, log-dir, log_file, log-file, log_path
+	logDirPattern  = regexp.MustCompile(`(?im)^\s*log(?:_|-)?dir\s*:\s*"?([^"\r\n#]+?)"?\s*(?:#.*)?$`)
+	logFilePattern = regexp.MustCompile(`(?im)^\s*log(?:_|-)?(?:file|path)\s*:\s*"?([^"\r\n#]+?)"?\s*(?:#.*)?$`)
 )
 
 // ParseSwapPort 从 YAML 文本字节流中提取 port 或 listen 端口
@@ -34,17 +35,22 @@ func ParseSwapPort(content []byte) (int, bool) {
 // ParseSwapLogDir 从 YAML 文本字节流中提取日志目录路径
 func ParseSwapLogDir(content []byte) (string, bool) {
 	if match := logDirPattern.FindSubmatch(content); len(match) > 1 {
-		return string(match[1]), true
+		dir := filepath.Clean(strings.TrimSpace(string(match[1])))
+		if dir != "" && dir != "." {
+			return dir, true
+		}
 	}
 	if match := logFilePattern.FindSubmatch(content); len(match) > 1 {
-		// 如果配置的是 log_file 具体文件路径，则取其所在目录
-		return filepath.Dir(string(match[1])), true
+		dir := filepath.Dir(strings.TrimSpace(string(match[1])))
+		if dir != "" && dir != "." {
+			return dir, true
+		}
 	}
 	return "", false
 }
 
-// DetectSwapPort 在给定的候选目录中寻找 config.yaml / config.yml，若找不到则返回官方默认端口 8080
-func DetectSwapPort(dirs ...string) int {
+// DetectSwapPort 在给定的候选目录中寻找 config.yaml / config.yml，若找不到则返回官方默认端口 8080 和 "config.yaml"
+func DetectSwapPort(dirs ...string) (int, string) {
 	for _, dir := range dirs {
 		if dir == "" {
 			continue
@@ -52,12 +58,12 @@ func DetectSwapPort(dirs ...string) int {
 		for _, name := range []string{"config.yaml", "config.yml"} {
 			if content, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
 				if port, ok := ParseSwapPort(content); ok {
-					return port
+					return port, name
 				}
 			}
 		}
 	}
-	return 8080
+	return 8080, "config.yaml"
 }
 
 // DetectSwapLogDir 尝试从配置文件中读取日志目录配置

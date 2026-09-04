@@ -3,7 +3,6 @@
 package platform
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -16,8 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
-
-	"llama-control/internal/fsutil"
 )
 
 // IsSupported 判断当前平台是否完全支持服务及管理操作
@@ -41,8 +38,20 @@ func RelaunchElevated() error {
 	if err != nil {
 		return err
 	}
-	quoted := strings.ReplaceAll(exePath, "'", "''")
-	return exec.Command("powershell", "-NoProfile", "-Command", "Start-Process '"+quoted+"' -Verb RunAs").Run()
+	quotedPath := strings.ReplaceAll(exePath, "'", "''")
+	
+	// 处理原始参数转发，但排除当前运行路径
+	var argsList []string
+	for _, arg := range os.Args[1:] {
+		argsList = append(argsList, "'"+strings.ReplaceAll(arg, "'", "''")+"'")
+	}
+	
+	argsStr := ""
+	if len(argsList) > 0 {
+		argsStr = " -ArgumentList " + strings.Join(argsList, ",")
+	}
+
+	return exec.Command("powershell", "-NoProfile", "-Command", "Start-Process '"+quotedPath+"'"+argsStr+" -Verb RunAs").Run()
 }
 
 // StartService 启动指定的 Windows 系统服务
@@ -53,9 +62,20 @@ func StopService(name string) error  { return StreamCommand("net", "stop", name)
 
 // RestartService 重启指定的 Windows 系统服务
 func RestartService(name string) error {
-	_ = StopService(name)
-	time.Sleep(2 * time.Second)
-	return StartService(name)
+	running, err := ServiceRunning(name)
+	if err != nil {
+		return fmt.Errorf("查询服务运行状态失败: %v", err)
+	}
+	if running {
+		if err := StopService(name); err != nil {
+			return fmt.Errorf("重启时停止服务失败: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if err := StartService(name); err != nil {
+		return fmt.Errorf("重启时启动服务失败: %v", err)
+	}
+	return nil
 }
 
 // ServiceStatus 查询 Windows 系统服务的当前运行状态 (如 Running/Stopped 等)
@@ -85,7 +105,14 @@ func SearchPath(name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return strings.Fields(out), nil
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, nil
 }
 
 // DefaultDirs 提供本平台下，搜索受管应用程序及其配置文件的常用候选目录
@@ -238,161 +265,10 @@ func (h *windowsServiceHandler) Execute(args []string, r <-chan svc.ChangeReques
 	}
 }
 
-// HandleServiceWorker 检查当前进程是否由 Windows 服务管理器唤醒或带有 --service-worker 标记
-func HandleServiceWorker(serviceName string) bool {
-	if isService, err := svc.IsWindowsService(); err == nil && isService {
-		runServiceWorker(serviceName)
-		return true
-	}
-	for _, arg := range os.Args[1:] {
-		if arg == "--service-worker" || arg == "-service-worker" {
-			runServiceWorker(serviceName)
-			return true
-		}
-	}
-	return false
-}
-
-// ManageService 封装 Windows 平台专属的服务查询、注销与原生 Win32 注册交互向导
-func ManageService(reader *bufio.Reader, serviceName string, getAppInfo func() (swapPath, appDir string, port int)) {
-	// 1. 优先通过系统底层查询服务是否已经存在
-	status, err := ServiceStatus(serviceName)
-	installed := err == nil && status != "" && status != "未找到"
-
-	if installed {
-		fmt.Printf("检测到系统服务 %s 已经存在（当前运行状态: %s）。\n", serviceName, status)
-		fmt.Print("是否注销/卸载该服务? (y/n): ")
-		choice, _ := reader.ReadString('\n')
-		if strings.EqualFold(strings.TrimSpace(choice), "y") {
-			if err := UninstallService(serviceName); err != nil {
-				fmt.Println("卸载服务失败:", err)
-			} else {
-				fmt.Println("服务已成功注销并从系统服务列表中移除。")
-			}
-		} else {
-			fmt.Println("已取消操作。")
-		}
-		return
-	}
-
-	// 2. 服务尚未注册，获取业务应用路径与端口
-	swapPath, appDir, port := getAppInfo()
-	if swapPath == "" {
-		fmt.Println("未找到 llama-swap 可执行文件，请确保 llama-swap.exe 位于当前目录、bin/ 目录或系统 PATH 中。")
-		return
-	}
-
-	fmt.Println("即将把 llama-swap 注册为 Windows 原生系统服务（零外部依赖，由本程序自守护）。")
-	fmt.Printf("  服务名称: %s\n", serviceName)
-	fmt.Printf("  程序路径: %s\n", swapPath)
-	fmt.Printf("  监听端口: %d\n", port)
-	fmt.Printf("  工作目录: %s\n", appDir)
-	fmt.Print("是否继续? (y/n): ")
-	choice, _ := reader.ReadString('\n')
-	if !strings.EqualFold(strings.TrimSpace(choice), "y") {
-		fmt.Println("已取消。")
-		return
-	}
-
-	selfExe, err := os.Executable()
-	if err != nil {
-		fmt.Println("获取当前程序路径失败:", err)
-		return
-	}
-	selfExe, _ = filepath.Abs(selfExe)
-
-	if err := RegisterService(serviceName, "Llama Swap API", selfExe, "--service-worker"); err != nil {
-		fmt.Println("注册服务失败:", err)
-		return
-	}
-	fmt.Println("服务注册成功！正在启动...")
-	if err := StartService(serviceName); err != nil {
-		fmt.Println("启动服务失败:", err)
-	} else {
-		fmt.Println("服务已启动并设置为开机自动运行。")
-	}
-}
-
-// runServiceWorker 在后台作为 Windows 服务守护进程运行，管理并自愈 llama-swap 子进程
-func runServiceWorker(serviceName string) {
-	err := RunAsService(serviceName, func(ctx context.Context) error {
-		exeDir := ExecutableDir()
-		candidates := []string{
-			filepath.Join(exeDir, "llama-swap.exe"),
-			filepath.Join(filepath.Dir(exeDir), "llama-swap.exe"),
-		}
-		for _, dir := range DefaultDirs() {
-			candidates = append(candidates, filepath.Join(dir, "llama-swap.exe"))
-		}
-		if paths, err := SearchPath("llama-swap.exe"); err == nil {
-			candidates = append(candidates, paths...)
-		}
-
-		var swapPath string
-		for _, c := range candidates {
-			if info, err := os.Stat(c); err == nil && !info.IsDir() {
-				swapPath = c
-				break
-			}
-		}
-		if swapPath == "" {
-			return fmt.Errorf("守护进程未找到 llama-swap.exe")
-		}
-		appDir := filepath.Dir(swapPath)
-
-		logDir := filepath.Join(appDir, "logs")
-		_ = os.MkdirAll(logDir, 0755)
-		dailyLogger := &fsutil.DailyLogWriter{Dir: logDir, Prefix: "swap"}
-		defer dailyLogger.Close()
-
-		port := 8080
-		for _, name := range []string{"config.yaml", "config.yml"} {
-			if content, err := os.ReadFile(filepath.Join(appDir, name)); err == nil {
-				for _, line := range strings.Split(string(content), "\n") {
-					line = strings.TrimSpace(line)
-					if strings.HasPrefix(strings.ToLower(line), "port:") {
-						parts := strings.SplitN(line, ":", 2)
-						if len(parts) > 1 {
-							if p, err := strconv.Atoi(strings.Trim(strings.TrimSpace(parts[1]), `"'`)); err == nil && p > 0 {
-								port = p
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// 守护监控与自动重启循环
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-			}
-
-			cmd := exec.CommandContext(ctx, swapPath, "-config", "config.yaml", "-listen", fmt.Sprintf(":%d", port))
-			cmd.Dir = appDir
-			cmd.Stdout = dailyLogger
-			cmd.Stderr = dailyLogger
-
-			_ = cmd.Run()
-
-			if ctx.Err() != nil {
-				return nil // 收到服务停止信号，正常退出
-			}
-
-			// 进程异常闪退，等待 3 秒后自动自愈拉起
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(3 * time.Second):
-			}
-		}
-	})
-	if err != nil {
-		fmt.Println("服务运行异常:", err)
-	}
+// isNativeService 判定当前进程是否由 Windows 服务管理器原生唤醒
+func isNativeService() bool {
+	isService, err := svc.IsWindowsService()
+	return err == nil && isService
 }
 
 

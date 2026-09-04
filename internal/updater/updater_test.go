@@ -55,3 +55,66 @@ func TestFormatBytes(t *testing.T) {
 		t.Fatalf("FormatBytes(1024) = %q", got)
 	}
 }
+
+func TestAssetScore_ArchMatching(t *testing.T) {
+	app := ManagedApp{
+		Name:       "llama.cpp",
+		BinaryBase: "llama-server",
+	}
+
+	tests := []struct {
+		name      string
+		assetName string
+		goos      string
+		goarch    string
+		variant   string
+		want      int // -1 for reject, or > 0 for accept
+	}{
+		{"amd64 rejects arm64", "llama-b3000-bin-macos-arm64.zip", "darwin", "amd64", "", -1},
+		{"amd64 accepts x64", "llama-b3000-bin-windows-x64.zip", "windows", "amd64", "", 12},
+		{"arm64 rejects amd64", "llama-b3000-bin-linux-amd64.tar.gz", "linux", "arm64", "", -1},
+		{"arm64 accepts arm64", "llama-b3000-bin-macos-arm64.zip", "darwin", "arm64", "metal", 20},
+		{"arm64 accepts tgz", "llama-b3000-bin-macos-arm64.tgz", "darwin", "arm64", "metal", 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := assetScore(tt.assetName, app, tt.variant, tt.goos, tt.goarch)
+			if tt.want == -1 && got != -1 {
+				t.Errorf("assetScore() = %v, want -1", got)
+			}
+			if tt.want > 0 && got <= 0 {
+				t.Errorf("assetScore() = %v, want > 0", got)
+			}
+		})
+	}
+}
+
+func TestAssetScore_VariantMatching(t *testing.T) {
+	app := ManagedApp{
+		Name:       "llama.cpp",
+		BinaryBase: "llama-server",
+	}
+	tests := []struct {
+		name      string
+		assetName string
+		goos      string
+		goarch    string
+		variant   string
+		want      int
+	}{
+		{"cuda12 accepts cuda12", "llama-b3000-bin-windows-cuda12-x64.zip", "windows", "amd64", "cuda12", 20},
+		{"cuda12 rejects cpu", "llama-b3000-bin-windows-x64.zip", "windows", "amd64", "cuda12", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := assetScore(tt.assetName, app, tt.variant, tt.goos, tt.goarch)
+			if tt.want == -1 && got != -1 {
+				t.Errorf("assetScore() = %v, want -1", got)
+			}
+			if tt.want > 0 && got <= 0 {
+				t.Errorf("assetScore() = %v, want > 0", got)
+			}
+		})
+	}
+}

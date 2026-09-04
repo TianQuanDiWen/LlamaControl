@@ -17,6 +17,7 @@ import (
 
 var (
 	serviceName = "llama-swap"
+	isWorker    bool
 )
 
 func init() {
@@ -24,13 +25,15 @@ func init() {
 		serviceName = envName
 	}
 	flag.StringVar(&serviceName, "service", serviceName, "Service name")
+	flag.BoolVar(&isWorker, "service-worker", false, "以守护进程 Worker 模式运行")
 }
 
 func main() {
-	if platform.HandleServiceWorker(serviceName) {
+	flag.Parse()
+
+	if platform.HandleServiceWorker(serviceName, isWorker) {
 		return
 	}
-	flag.Parse()
 
 	platform.ConfigureConsole()
 	if !platform.IsSupported() {
@@ -111,7 +114,7 @@ func showStatus() {
 		fmt.Printf("服务 %s: %s\n", serviceName, status)
 	}
 
-	port := detectSwapPort()
+	port, _ := detectSwapPort()
 	listening, err := platform.PortListening(port)
 	if err != nil {
 		fmt.Println("无法查询端口状态:", err)
@@ -124,7 +127,7 @@ func showStatus() {
 }
 
 // detectSwapPort 根据可执行文件所在路径自动探测配置文件的监听端口
-func detectSwapPort() int {
+func detectSwapPort() (int, string) {
 	dirs := []string{platform.ExecutableDir()}
 	for _, app := range updater.ManagedApps {
 		if app.Name == "llama-swap" {
@@ -137,19 +140,22 @@ func detectSwapPort() int {
 	return config.DetectSwapPort(dirs...)
 }
 
-// cleanLogs 调用平台相关实现去清理服务日志文件
-func cleanLogs() {
-	var logDir string
-	exeDir := platform.ExecutableDir()
+func getLogDir(exeDir string) string {
 	dirs := append([]string{filepath.Dir(exeDir)}, platform.DefaultDirs()...)
 	if dir, ok := config.DetectSwapLogDir(dirs...); ok && dir != "" {
-		logDir = dir
-		fmt.Printf("从配置文件中读取到日志路径: %s\n", logDir)
-	} else {
-		// 回退到程序所在目录的 logs 文件夹（绿色便携模式）
-		logDir = filepath.Join(exeDir, "logs")
-		fmt.Printf("未配置日志路径，使用默认本地路径: %s\n", logDir)
+		if filepath.IsAbs(dir) {
+			return dir
+		}
+		return filepath.Join(exeDir, dir)
 	}
+	return filepath.Join(exeDir, "logs")
+}
+
+// cleanLogs 调用平台相关实现去清理服务日志文件
+func cleanLogs() {
+	exeDir := platform.ExecutableDir()
+	logDir := getLogDir(exeDir)
+	fmt.Printf("准备清理日志目录: %s\n", logDir)
 	if err := fsutil.CleanLogs(logDir); err != nil {
 		fmt.Println("清理日志失败:", err)
 	}
@@ -158,7 +164,7 @@ func cleanLogs() {
 
 // manageService 委派底层平台抽象层处理系统服务的查询、注销与注册流程
 func manageService(reader *bufio.Reader) {
-	platform.ManageService(reader, serviceName, func() (string, string, int) {
+	platform.ManageService(reader, serviceName, func() (string, string, int, string) {
 		var swapPath string
 		for _, app := range updater.ManagedApps {
 			if app.Name == "llama-swap" {
@@ -166,10 +172,12 @@ func manageService(reader *bufio.Reader) {
 				break
 			}
 		}
-		if swapPath == "" {
-			return "", "", 0
+		if swapPath != "" {
+			appDir := filepath.Dir(swapPath)
+			port, configFile := config.DetectSwapPort(appDir)
+			return swapPath, appDir, port, configFile
 		}
-		return swapPath, filepath.Dir(swapPath), detectSwapPort()
+		return "", "", 0, "config.yaml"
 	})
 	waitForEnter()
 }

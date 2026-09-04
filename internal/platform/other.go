@@ -3,7 +3,6 @@
 package platform
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -70,9 +69,5 @@ func ExecutableNames(base string) []string { return []string{base} }
 func RegisterService(name, displayName, exePath string, args ...string) error { return unsupported() }
 func UninstallService(string) error                                               { return unsupported() }
 func RunAsService(serviceName string, runFn func(ctx context.Context) error) error { return unsupported() }
-func HandleServiceWorker(serviceName string) bool                                 { return false }
-func ManageService(reader *bufio.Reader, serviceName string, getAppInfo func() (swapPath, appDir string, port int)) {
-	fmt.Println("当前平台暂未实现系统服务管理功能。")
-}
 
-
+func isNativeService() bool { return false }

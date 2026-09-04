@@ -79,7 +79,7 @@ func SelectReleaseAsset(assets []GithubAsset, app ManagedApp, variant, goos, goa
 }
 
 func assetScore(name string, app ManagedApp, variant, goos, goarch string) int {
-	if !strings.Contains(name, ".zip") && !strings.Contains(name, ".tar.gz") && !strings.HasSuffix(name, ".exe") {
+	if !strings.Contains(name, ".zip") && !strings.Contains(name, ".tar.gz") && !strings.Contains(name, ".tgz") && !strings.HasSuffix(name, ".exe") {
 		return -1
 	}
 	score := 0
@@ -106,6 +106,9 @@ func assetScore(name string, app ManagedApp, variant, goos, goarch string) int {
 		score += 3
 	}
 	if goarch == "amd64" && platform.ContainsAny(name, "arm64", "aarch64") {
+		return -1
+	}
+	if goarch == "arm64" && platform.ContainsAny(name, "amd64", "x64", "x86_64") {
 		return -1
 	}
 	if variant != "" {
