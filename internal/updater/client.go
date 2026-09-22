@@ -55,9 +55,17 @@ func FetchLatestRelease(app ManagedApp) (GithubRelease, error) {
 	return release, nil
 }
 
-// DownloadWithProgress 带控制台进度条的下载器，将 URL 下载到指定本地路径
+// DownloadWithProgress 带控制台进度条的下载器，将 URL 下载到指定本地路径（支持镜像加速 fallback）
 func DownloadWithProgress(url, path string) error {
 	resp, err := DownloadClient.Get(url)
+	if (err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300) && !strings.HasPrefix(url, "https://ghproxy.net/") {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		mirrorURL := "https://ghproxy.net/" + url
+		fmt.Printf("\n直连下载异常，正在尝试加速镜像: %s\n", mirrorURL)
+		resp, err = DownloadClient.Get(mirrorURL)
+	}
 	if err != nil {
 		return err
 	}

@@ -209,6 +209,49 @@ func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 	waitForEnter()
 }
 
+// UpdateAppByName 执行指定名称应用的自动更新流程，支持单个应用 (如 "llama-swap" / "llama.cpp")
+func UpdateAppByName(appName string, serviceName string, force bool) error {
+	var targetApp *ManagedApp
+	for i := range ManagedApps {
+		if strings.EqualFold(ManagedApps[i].Name, appName) {
+			targetApp = &ManagedApps[i]
+			break
+		}
+	}
+	if targetApp == nil {
+		return fmt.Errorf("未找到受管应用: %s", appName)
+	}
+
+	status := InspectApp(*targetApp)
+	if status.Path == "" {
+		return fmt.Errorf("本地未找到 %s 可执行文件，无法执行更新", targetApp.Name)
+	}
+	if status.CheckErr != nil {
+		return fmt.Errorf("检查最新版本失败: %w", status.CheckErr)
+	}
+	if !force && !status.NeedsUpdate() {
+		return fmt.Errorf("%s 当前已是最新版本 (%s)", targetApp.Name, status.LocalVersion)
+	}
+
+	serviceWasRunning, _ := platform.ServiceRunning(serviceName)
+	if serviceWasRunning {
+		fmt.Printf("正在暂停 %s 服务以安全更新 %s...\n", serviceName, targetApp.Name)
+		if err := platform.StopService(serviceName); err != nil {
+			return fmt.Errorf("暂停系统服务失败: %w", err)
+		}
+		defer func() {
+			fmt.Printf("正在恢复 %s 服务...\n", serviceName)
+			_ = platform.StartService(serviceName)
+		}()
+	}
+
+	fmt.Printf("[Web触发更新] 正在升级 %s %s -> %s\n", targetApp.Name, status.LocalVersion, status.Release.TagName)
+	if err := InstallRelease(status); err != nil {
+		return fmt.Errorf("安装更新失败: %w", err)
+	}
+	return nil
+}
+
 // InspectApp 检查指定受管应用程序的本地状态和云端最新版本
 func InspectApp(app ManagedApp) AppStatus {
 	status := AppStatus{App: app}

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +15,16 @@ import (
 	"llama-control/internal/fsutil"
 	"llama-control/internal/platform"
 	"llama-control/internal/updater"
+	"llama-control/internal/web"
 )
 
 var (
-	serviceName = "llama-swap"
-	isWorker    bool
+	serviceName     = "llama-swap"
+	isWorker        bool
+	runWeb          bool
+	webAddr         string
+	webServerActive bool
+	activeWebAddr   string
 )
 
 func init() {
@@ -26,12 +33,69 @@ func init() {
 	}
 	flag.StringVar(&serviceName, "service", serviceName, "Service name")
 	flag.BoolVar(&isWorker, "service-worker", false, "以守护进程 Worker 模式运行")
+	flag.BoolVar(&runWeb, "web", false, "以 Web 控制面板模式运行")
+	flag.StringVar(&webAddr, "web-addr", "127.0.0.1:11452", "Web 控制面板监听地址")
+}
+
+func isWebAddrExplicit() bool {
+	explicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "web-addr" {
+			explicit = true
+		}
+	})
+	return explicit
 }
 
 func main() {
 	flag.Parse()
 
-	if platform.HandleServiceWorker(serviceName, isWorker) {
+	webHook := func(ctx context.Context, swapPort int, configFile, logDir string) {
+		resolvedAddr, err := web.ResolveWebAddr(webAddr, swapPort, isWebAddrExplicit())
+		if err != nil {
+			fmt.Println("[Web] 无法启动伴随 Web 服务:", err)
+			return
+		}
+		server := web.NewServer(web.Config{
+			ServiceName: serviceName,
+			SwapPort:    swapPort,
+			ConfigFile:  configFile,
+			LogDir:      logDir,
+			Addr:        resolvedAddr,
+		})
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = server.Stop(shutdownCtx)
+		}()
+		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+			fmt.Println("[Web] 伴随 Web 控制面板退出:", err)
+		}
+	}
+
+	if platform.HandleServiceWorker(serviceName, isWorker, webHook) {
+		return
+	}
+
+	if runWeb {
+		port, configFile := detectSwapPort()
+		logDir := getLogDir(platform.ExecutableDir())
+		resolvedAddr, err := web.ResolveWebAddr(webAddr, port, isWebAddrExplicit())
+		if err != nil {
+			fmt.Println("Web 地址配置错误:", err)
+			return
+		}
+		server := web.NewServer(web.Config{
+			ServiceName: serviceName,
+			SwapPort:    port,
+			ConfigFile:  configFile,
+			LogDir:      logDir,
+			Addr:        resolvedAddr,
+		})
+		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+			fmt.Println("启动 Web 服务失败:", err)
+		}
 		return
 	}
 
@@ -63,8 +127,13 @@ func showMenu() {
 		fmt.Println("  [5] 清理日志")
 		fmt.Println("  [6] 检查并更新 llama.cpp / llama-swap")
 		fmt.Println("  [7] 注册/卸载系统服务")
+		if webServerActive {
+			fmt.Printf("  [8] 查看 Web 监控面板 (http://%s) [运行中]\n", activeWebAddr)
+		} else {
+			fmt.Printf("  [8] 启动 Web 监控面板 (http://%s)\n", webAddr)
+		}
 		fmt.Println("  [0] 退出")
-		fmt.Print("\n请选择操作 (0-7): ")
+		fmt.Print("\n请选择操作 (0-8): ")
 		choice, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Println("读取输入失败:", err)
@@ -85,6 +154,8 @@ func showMenu() {
 			updater.UpdateManagedApps(reader, serviceName)
 		case "7":
 			manageService(reader)
+		case "8":
+			startWebDashboard(reader)
 		case "0":
 			return
 		default:
@@ -92,6 +163,52 @@ func showMenu() {
 			time.Sleep(time.Second)
 		}
 	}
+}
+
+// startWebDashboard 在后台协程启动 Web 控制面板与反代，并在终端给出提示
+func startWebDashboard(reader *bufio.Reader) {
+	if webServerActive {
+		fmt.Println("\n========================================")
+		fmt.Printf("  Web 控制面板已在后台运行中！\n")
+		fmt.Printf("  监控管理主页: http://%s\n", activeWebAddr)
+		fmt.Printf("  Swap 代理入口: http://%s/swap/ui\n", activeWebAddr)
+		fmt.Println("========================================")
+		waitForEnter()
+		return
+	}
+
+	port, configFile := detectSwapPort()
+	logDir := getLogDir(platform.ExecutableDir())
+	resolvedAddr, err := web.ResolveWebAddr(webAddr, port, isWebAddrExplicit())
+	if err != nil {
+		fmt.Println("Web 地址配置错误:", err)
+		waitForEnter()
+		return
+	}
+	server := web.NewServer(web.Config{
+		ServiceName: serviceName,
+		SwapPort:    port,
+		ConfigFile:  configFile,
+		LogDir:      logDir,
+		Addr:        resolvedAddr,
+	})
+	webServerActive = true
+	activeWebAddr = resolvedAddr
+
+	go func() {
+		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+			webServerActive = false
+			fmt.Println("Web 监控面板运行异常:", err)
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("\n========================================")
+	fmt.Printf("  Web 控制面板已启动！\n")
+	fmt.Printf("  监控管理主页: http://%s\n", resolvedAddr)
+	fmt.Printf("  Swap 代理入口: http://%s/swap/ui\n", resolvedAddr)
+	fmt.Println("========================================")
+	waitForEnter()
 }
 
 // runServiceAction 包装服务相关的操作，统一步骤提示和错误处理
