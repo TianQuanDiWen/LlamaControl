@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LlamaControl 管理面板</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-indigo-500 selection:text-white">
+
+  <!-- 顶部导航栏 -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+          🦙
+        </div>
+        <div>
+          <h1 class="text-base font-semibold leading-none">LlamaControl</h1>
+          <span id="platform-badge" class="text-xs text-slate-400">检测平台中...</span>
+        </div>
+      </div>
+
+      <!-- 标签页切换 -->
+      <nav class="flex space-x-1 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50">
+        <button onclick="switchTab('overview')" id="tab-overview" class="tab-btn px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all duration-150 bg-indigo-600 text-white shadow">
+          📊 概览与控制
+        </button>
+        <button onclick="switchTab('swap')" id="tab-swap" class="tab-btn px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all duration-150 text-slate-300 hover:text-white hover:bg-slate-700/50">
+          🔄 Swap 原生面板
+        </button>
+        <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all duration-150 text-slate-300 hover:text-white hover:bg-slate-700/50">
+          📜 运行日志
+        </button>
+      </nav>
+
+      <div class="flex items-center space-x-3">
+        <div id="service-status-pill" class="flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
+          <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+          <span id="service-status-text">查询中...</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 提示条 -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-20 opacity-0 bg-slate-800 border border-slate-700 px-4 py-3 rounded-xl shadow-2xl text-sm flex items-center space-x-3">
+    <span id="toast-icon">✨</span>
+    <span id="toast-msg">提示信息</span>
+  </div>
+
+  <!-- 主体内容 -->
+  <main id="main-container" class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+
+    <!-- 标签页 1：概览与控制 -->
+    <section id="panel-overview" class="space-y-6">
+      
+      <!-- 快捷操作栏 -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">系统服务快捷控制</h2>
+        <div class="flex flex-wrap gap-3">
+          <button onclick="serviceAction('start')" class="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-sm font-medium px-5 py-2.5 rounded-xl transition shadow-lg shadow-emerald-600/20">
+            <span>▶ 启动服务</span>
+          </button>
+          <button onclick="serviceAction('stop')" class="flex items-center space-x-2 bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-sm font-medium px-5 py-2.5 rounded-xl transition shadow-lg shadow-rose-600/20">
+            <span>⏹ 停止服务</span>
+          </button>
+          <button onclick="serviceAction('restart')" class="flex items-center space-x-2 bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-sm font-medium px-5 py-2.5 rounded-xl transition shadow-lg shadow-amber-600/20">
+            <span>🔄 重启服务</span>
+          </button>
+          <button onclick="fetchStatus()" class="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 text-sm font-medium px-4 py-2.5 rounded-xl transition border border-slate-700">
+            <span>🔃 立即刷新</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 核心指标卡片 -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        
+        <!-- 运行状态卡 -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
+          <div>
+            <div class="text-xs text-slate-400 font-medium">系统服务运行状态</div>
+            <div id="stat-service" class="text-2xl font-bold mt-2 text-slate-200">-</div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-500 flex justify-between">
+            <span>服务名称</span>
+            <span id="stat-service-name" class="font-mono text-slate-400">llama-swap</span>
+          </div>
+        </div>
+
+        <!-- 端口状态卡 -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
+          <div>
+            <div class="text-xs text-slate-400 font-medium">Llama-Swap 监听端口</div>
+            <div id="stat-port" class="text-2xl font-bold mt-2 text-slate-200">-</div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-500 flex justify-between items-center">
+            <span>配置文件</span>
+            <span id="stat-config-file" class="font-mono text-slate-400">config.yaml</span>
+          </div>
+        </div>
+
+        <!-- 反向代理状态卡 -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
+          <div>
+            <div class="text-xs text-slate-400 font-medium">反向代理入口 (Reverse Proxy)</div>
+            <div class="text-2xl font-bold mt-2 text-indigo-400">/swap/ui</div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-500 flex justify-between items-center">
+            <span>透明转发目标</span>
+            <span id="stat-proxy-target" class="font-mono text-slate-400">127.0.0.1:8080</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 受管组件版本卡片 -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">核心组件版本状态</h2>
+          <button id="btn-check-updates" onclick="checkUpdates()" class="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 hover:text-white text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-700 transition">
+            <span id="check-update-icon">🔄</span>
+            <span id="check-update-text">检查最新版本</span>
+          </button>
+        </div>
+        <div id="apps-container" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="text-sm text-slate-500">正在检查版本信息...</div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- 标签页 2：Swap 原生面板 (沉浸式全屏) -->
+    <section id="panel-swap" class="hidden relative w-full h-[calc(100vh-4rem)]">
+      <!-- 悬浮全屏新标签按钮 -->
+      <a href="/swap/ui" target="_blank" class="absolute top-3 right-3 z-10 bg-slate-900/80 hover:bg-slate-800 backdrop-blur border border-slate-700/80 text-xs text-indigo-400 hover:text-indigo-300 font-medium px-3 py-1.5 rounded-lg shadow-lg flex items-center space-x-1.5 transition">
+        <span>在新标签页打开</span>
+        <span>↗</span>
+      </a>
+
+      <!-- 未运行时的友好提示卡片 -->
+      <div id="swap-not-running" class="hidden w-full h-full flex-col items-center justify-center p-8 text-center bg-slate-950">
+        <div class="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-3xl mb-4">
+          ⚠️
+        </div>
+        <h3 class="text-lg font-bold text-slate-200 mb-2">Llama-Swap 服务当前未启动</h3>
+        <p class="text-sm text-slate-400 max-w-md mb-6">底层的模型热切换引擎尚未运行，因此原生面板无法连接。请点击下方按钮启动服务：</p>
+        <button onclick="serviceAction('start')" class="bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-sm font-medium px-6 py-2.5 rounded-xl transition shadow-lg shadow-emerald-600/20 flex items-center space-x-2">
+          <span>▶ 立即启动服务</span>
+        </button>
+      </div>
+
+      <!-- 运行中的 iframe 容器 -->
+      <div id="swap-frame-container" class="w-full h-full">
+        <iframe src="/swap/ui" class="w-full h-full border-0" id="swap-iframe"></iframe>
+      </div>
+    </section>
+
+    <!-- 标签页 3：运行日志 -->
+    <section id="panel-logs" class="hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-3 text-xs text-slate-400">
+          <span id="log-dir-hint">日志存储目录: 读取中...</span>
+          <label class="flex items-center space-x-1.5 cursor-pointer">
+            <input type="checkbox" id="auto-refresh-logs" checked class="rounded border-slate-700 text-indigo-600 focus:ring-0">
+            <span>自动刷新 (3s)</span>
+          </label>
+        </div>
+        <div class="flex items-center space-x-2">
+          <button onclick="fetchLogs()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-medium rounded-lg border border-slate-700 transition">
+            刷新日志
+          </button>
+          <button onclick="cleanLogs()" class="px-3 py-1.5 bg-rose-600/80 hover:bg-rose-600 text-xs font-medium rounded-lg text-white transition">
+            清空日志
+          </button>
+        </div>
+      </div>
+      <div class="bg-slate-950 border border-slate-800 rounded-2xl p-4 font-mono text-xs text-slate-300 h-[70vh] overflow-y-auto no-scrollbar shadow-inner" id="log-console">
+        <div class="text-slate-600">正在拉取日志数据...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    let currentTab = 'overview';
+    let logPollTimer = null;
+
+    function switchTab(tab) {
+      currentTab = tab;
+      const mainContainer = document.getElementById('main-container');
+      if (tab === 'swap') {
+        mainContainer.className = 'flex-1 w-full p-0 overflow-hidden';
+      } else {
+        mainContainer.className = 'flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8';
+      }
+
+      ['overview', 'swap', 'logs'].forEach(t => {
+        const panel = document.getElementById(`panel-${t}`);
+        const btn = document.getElementById(`tab-${t}`);
+        if (t === tab) {
+          panel.classList.remove('hidden');
+          btn.className = 'tab-btn px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all duration-150 bg-indigo-600 text-white shadow';
+        } else {
+          panel.classList.add('hidden');
+          btn.className = 'tab-btn px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all duration-150 text-slate-300 hover:text-white hover:bg-slate-700/50';
+        }
+      });
+      if (tab === 'logs') {
+        fetchLogs();
+      }
+      if (tab === 'swap') {
+        const iframe = document.getElementById('swap-iframe');
+        if (iframe && (!iframe.src || !iframe.src.includes('/swap/ui'))) {
+          iframe.src = '/swap/ui';
+        }
+      }
+    }
+
+    function showToast(msg, ok = true) {
+      const toast = document.getElementById('toast');
+      const msgEl = document.getElementById('toast-msg');
+      const iconEl = document.getElementById('toast-icon');
+      msgEl.innerText = msg;
+      iconEl.innerText = ok ? '✨' : '❌';
+      toast.classList.remove('translate-y-20', 'opacity-0');
+      setTimeout(() => {
+        toast.classList.add('translate-y-20', 'opacity-0');
+      }, 3500);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) throw new Error('API 异常');
+        const data = await res.json();
+        
+        // 平台与服务名
+        document.getElementById('platform-badge').innerText = `${data.platform} (${data.arch})`;
+        document.getElementById('stat-service-name').innerText = data.service_name || 'llama-swap';
+        document.getElementById('stat-config-file').innerText = data.config_file || 'config.yaml';
+        document.getElementById('stat-proxy-target').innerText = `127.0.0.1:${data.port || 8080}`;
+
+        // 状态判定
+        const isRunning = data.running;
+        const statusText = data.service_status || '未知';
+        document.getElementById('stat-service').innerText = statusText;
+        document.getElementById('stat-service').className = `text-2xl font-bold mt-2 ${isRunning ? 'text-emerald-400' : 'text-slate-300'}`;
+
+        const pill = document.getElementById('service-status-pill');
+        const pillText = document.getElementById('service-status-text');
+        pillText.innerText = isRunning ? '服务运行中' : '服务已停止';
+        pill.className = `flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium border ${isRunning ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-slate-900 text-slate-400 border-slate-800'}`;
+        pill.firstElementChild.className = `w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`;
+
+        // 端口状态
+        const portListening = data.listening;
+        const portEl = document.getElementById('stat-port');
+        portEl.innerText = `${data.port} ${portListening ? '(正常监听)' : '(未响应)'}`;
+        portEl.className = `text-2xl font-bold mt-2 ${portListening ? 'text-emerald-400' : 'text-amber-400'}`;
+
+        // 联动 Swap 原生面板状态提示
+        const swapNotRunning = document.getElementById('swap-not-running');
+        const swapFrameContainer = document.getElementById('swap-frame-container');
+        if (swapNotRunning && swapFrameContainer) {
+          if (!isRunning) {
+            swapNotRunning.classList.remove('hidden');
+            swapNotRunning.classList.add('flex');
+            swapFrameContainer.classList.add('hidden');
+          } else {
+            swapNotRunning.classList.add('hidden');
+            swapNotRunning.classList.remove('flex');
+            swapFrameContainer.classList.remove('hidden');
+          }
+        }
+
+        // 渲染受管应用卡片 (支持单独升级)
+        if (data.apps && data.apps.length > 0) {
+          const appHtml = data.apps.map(app => {
+            const hasNewVer = app.needs_update;
+            const isInstalled = app.local_version && app.local_version !== 'unknown';
+            return `
+            <div class="bg-slate-950/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-slate-700 transition">
+              <div>
+                <div class="flex items-center justify-between mb-3">
+                  <div class="flex items-center space-x-2">
+                    <span class="font-bold text-slate-200 text-sm">${app.name}</span>
+                    ${app.variant ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/60 font-mono">${app.variant}</span>` : ''}
+                  </div>
+                  <span class="text-xs px-2 py-0.5 rounded font-medium ${hasNewVer ? 'bg-amber-950/80 text-amber-300 border border-amber-800/80 animate-pulse' : 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'}">
+                    ${hasNewVer ? '有可用更新' : (isInstalled ? '已是最新' : '未安装')}
+                  </span>
+                </div>
+                <div class="space-y-1.5 text-xs text-slate-400 font-mono bg-slate-900/50 p-2.5 rounded-lg border border-slate-800/50">
+                  <div class="flex justify-between">
+                    <span class="text-slate-500">本地版本:</span>
+                    <span class="text-slate-200 font-semibold">${app.local_version || '未安装'}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-slate-500">云端最新:</span>
+                    <span class="${hasNewVer ? 'text-amber-400 font-bold' : 'text-indigo-300'}">${app.remote_version || '未获取'}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between">
+                ${hasNewVer ? `
+                  <button onclick="updateApp('${app.name}')" id="btn-update-${app.name}" class="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center space-x-1.5">
+                    <span>🚀 升级至 ${app.remote_version}</span>
+                  </button>
+                ` : `
+                  <span class="text-xs text-emerald-400/90 flex items-center space-x-1">
+                    <span>✓</span>
+                    <span>已处于最新版本</span>
+                  </span>
+                  <button onclick="updateApp('${app.name}', true)" id="btn-update-${app.name}" class="text-xs text-slate-500 hover:text-slate-300 underline transition">
+                    重新安装
+                  </button>
+                `}
+              </div>
+            </div>
+            `;
+          }).join('');
+          document.getElementById('apps-container').innerHTML = appHtml;
+        }
+
+        if (data.log_dir) {
+          document.getElementById('log-dir-hint').innerText = `日志存储目录: ${data.log_dir}`;
+        }
+
+      } catch (err) {
+        console.error('获取状态失败', err);
+      }
+    }
+
+    async function checkUpdates(force = true) {
+      const btn = document.getElementById('btn-check-updates');
+      const icon = document.getElementById('check-update-icon');
+      const text = document.getElementById('check-update-text');
+      if (force && btn) btn.disabled = true;
+      if (force && icon) icon.className = 'inline-block animate-spin';
+      if (force && text) text.innerText = '正在检查...';
+
+      try {
+        if (force) showToast('正在向 GitHub 查询最新版本...', true);
+        const url = force ? '/api/apps/check?force=true' : '/api/apps/check';
+        const res = await fetch(url, { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          if (force) showToast(data.msg || '最新版本检查完成', true);
+          await fetchStatus();
+        } else if (force) {
+          showToast(data.msg || '检查更新失败', false);
+        }
+      } catch (err) {
+        if (force) showToast(`请求异常: ${err}`, false);
+      } finally {
+        if (force) {
+          if (btn) btn.disabled = false;
+          if (icon) icon.className = '';
+          if (text) text.innerText = '检查最新版本';
+        }
+      }
+    }
+
+    let isUpdating = false;
+
+    async function updateApp(appName, force = false) {
+      if (isUpdating) {
+        showToast('已有正在进行的升级任务，请稍候', false);
+        return;
+      }
+      if (force && !confirm(`确定要重新安装/覆盖 ${appName} 吗？`)) {
+        return;
+      }
+
+      isUpdating = true;
+      const btn = document.getElementById(`btn-update-${appName}`);
+      const originalText = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span>⏳ 正在下载并替换中...</span>';
+        btn.className = 'w-full bg-slate-800 text-slate-400 text-xs py-2 px-3 rounded-xl flex items-center justify-center cursor-not-allowed';
+      }
+
+      showToast(`正在下载并安全替换 ${appName}，请勿关闭页面...`, true);
+
+      try {
+        const res = await fetch('/api/apps/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ app: appName, force: force })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (data.warning) {
+            showToast(data.msg, false);
+            alert(data.msg);
+          } else {
+            showToast(data.msg || `${appName} 升级成功！`, true);
+          }
+          await fetchStatus();
+        } else {
+          showToast(data.msg || '升级失败', false);
+        }
+      } catch (err) {
+        showToast(`升级请求发生异常: ${err}`, false);
+      } finally {
+        isUpdating = false;
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = originalText;
+          btn.className = 'w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center space-x-1.5';
+        }
+      }
+    }
+
+    async function serviceAction(action) {
+      try {
+        const res = await fetch(`/api/service/${action}`, { method: 'POST' });
+        const result = await res.json();
+        if (result.ok) {
+          showToast(result.msg || '操作成功', true);
+        } else {
+          showToast(result.msg || '操作失败', false);
+        }
+        setTimeout(fetchStatus, 1000);
+      } catch (err) {
+        showToast(`请求异常: ${err}`, false);
+      }
+    }
+
+    async function fetchLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        if (!res.ok) return;
+        const text = await res.text();
+        const consoleEl = document.getElementById('log-console');
+        if (text.trim() === '') {
+          consoleEl.innerHTML = '<div class="text-slate-600">暂无日志内容</div>';
+        } else {
+          consoleEl.innerText = text;
+          consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+      } catch (err) {
+        console.error('拉取日志失败', err);
+      }
+    }
+
+    async function cleanLogs() {
+      if (!confirm('确认清空当前日志文件？')) return;
+      try {
+        const res = await fetch('/api/logs/clean', { method: 'POST' });
+        const result = await res.json();
+        showToast(result.msg || '清理完成', result.ok);
+        fetchLogs();
+      } catch (err) {
+        showToast('清理请求失败', false);
+      }
+    }
+
+    // 初始化与轮询：进入页面即时拉取本地状态，后台同步版本缓存（<15分钟直接复用缓存）
+    fetchStatus();
+    checkUpdates(false);
+    setInterval(fetchStatus, 4000);
+
+    // 日志自动刷新
+    setInterval(() => {
+      if (currentTab === 'logs' && document.getElementById('auto-refresh-logs').checked) {
+        fetchLogs();
+      }
+    }, 3000);
+  </script>
+</body>
+</html>

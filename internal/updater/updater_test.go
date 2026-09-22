@@ -1,6 +1,11 @@
 package updater
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -118,3 +123,45 @@ func TestAssetScore_VariantMatching(t *testing.T) {
 		})
 	}
 }
+
+func TestDownloadWithProgressCleansUpOnFailure(t *testing.T) {
+	// 1. 模拟一个非完整传输的异常服务端（ContentLength 100 字节，实际只发 10 字节）
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("1234567890"))
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "broken.zip")
+
+	err := DownloadWithProgress(server.URL, targetPath)
+	if err == nil {
+		t.Fatal("expected DownloadWithProgress to return error on truncated content")
+	}
+
+	// 验证残缺文件已被自动清理删除
+	if _, statErr := os.Stat(targetPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected broken file to be removed, but it still exists: %v", statErr)
+	}
+
+	// 2. 模拟正常服务端，验证正常下载成功保留
+	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := []byte("complete package content")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	}))
+	defer goodServer.Close()
+
+	goodPath := filepath.Join(tmpDir, "good.zip")
+	goodErr := DownloadWithProgress(goodServer.URL, goodPath)
+	if goodErr != nil {
+		t.Fatalf("expected download to succeed, got: %v", goodErr)
+	}
+	if _, statErr := os.Stat(goodPath); statErr != nil {
+		t.Fatalf("expected good file to exist, got: %v", statErr)
+	}
+}
+

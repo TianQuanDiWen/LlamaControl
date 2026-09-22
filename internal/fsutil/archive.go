@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ExtractPackage 根据文件后缀名自动选择解压策略，将目标可执行文件及其同目录下的所有依赖文件解压到目标文件夹
@@ -201,6 +202,19 @@ func CopyFile(src, dst string) error {
 	return nil
 }
 
+// retryRename 在重命名遇到文件占用（如 Windows 下服务刚停止、内核句柄未完全关闭）时进行短暂重试
+func retryRename(src, dst string, maxAttempts int, interval time.Duration) error {
+	var err error
+	for i := 0; i < maxAttempts; i++ {
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(interval)
+	}
+	return err
+}
+
 // ReplacePackageSafely 事务性原子替换目标目录下的程序及其依赖动态库，若验证失败自动回滚
 func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string) error) error {
 	entries, err := os.ReadDir(srcDir)
@@ -217,7 +231,7 @@ func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		for i := len(installed) - 1; i >= 0; i-- {
 			name := installed[i]
 			_ = os.Remove(filepath.Join(dstDir, name))
-			_ = os.Rename(filepath.Join(backupDir, name), filepath.Join(dstDir, name))
+			_ = retryRename(filepath.Join(backupDir, name), filepath.Join(dstDir, name), 5, 200*time.Millisecond)
 		}
 	}
 	for _, entry := range entries {
@@ -240,20 +254,20 @@ func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		}
 		hadBackup := false
 		if _, err := os.Stat(dst); err == nil {
-			if err := os.Rename(dst, filepath.Join(backupDir, name)); err != nil {
+			if err := retryRename(dst, filepath.Join(backupDir, name), 5, 200*time.Millisecond); err != nil {
 				os.Remove(tempPath)
 				rollback()
-				return err
+				return fmt.Errorf("备份目标文件 %s 失败 (文件可能仍被进程占用): %w", name, err)
 			}
 			hadBackup = true
 		}
-		if err := os.Rename(tempPath, dst); err != nil {
+		if err := retryRename(tempPath, dst, 5, 200*time.Millisecond); err != nil {
 			if hadBackup {
-				_ = os.Rename(filepath.Join(backupDir, name), dst)
+				_ = retryRename(filepath.Join(backupDir, name), dst, 5, 200*time.Millisecond)
 			}
 			os.Remove(tempPath)
 			rollback()
-			return err
+			return fmt.Errorf("替换目标文件 %s 失败: %w", name, err)
 		}
 		installed = append(installed, name)
 	}

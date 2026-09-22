@@ -85,17 +85,20 @@ func FormatVariant(variant string) string {
 	}
 }
 
+// WorkerHook 随守护服务一同启动的附加后台任务（如伴随 Web 控制台）
+type WorkerHook func(ctx context.Context, swapPort int, configFile, logDir string)
+
 // HandleServiceWorker 检查当前进程是否由原生系统服务管理器唤醒或带有 --service-worker 标记
-func HandleServiceWorker(serviceName string, hasWorkerFlag bool) bool {
+func HandleServiceWorker(serviceName string, hasWorkerFlag bool, hooks ...WorkerHook) bool {
 	if isNativeService() || hasWorkerFlag {
-		runServiceWorker(serviceName)
+		runServiceWorker(serviceName, hooks...)
 		return true
 	}
 	return false
 }
 
 // runServiceWorker 在后台作为守护进程运行，管理并自愈 llama-swap 子进程
-func runServiceWorker(serviceName string) {
+func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 	err := RunAsService(serviceName, func(ctx context.Context) error {
 		exeDir := ExecutableDir()
 		var candidates []string
@@ -146,6 +149,13 @@ func runServiceWorker(serviceName string) {
 		_ = os.MkdirAll(logDir, 0755)
 		dailyLogger := &fsutil.DailyLogWriter{Dir: logDir, Prefix: "swap"}
 		defer dailyLogger.Close()
+
+		// 启动附加的服务随行任务（如内置 Web 控制面板）
+		for _, hook := range hooks {
+			if hook != nil {
+				go hook(ctx, port, configFile, logDir)
+			}
+		}
 
 		// 守护监控与自动重启循环
 		for {

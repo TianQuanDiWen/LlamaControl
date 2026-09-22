@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"llama-control/internal/fsutil"
 	"llama-control/internal/platform"
@@ -185,6 +186,8 @@ func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 			waitForEnter()
 			return
 		}
+		_ = waitForServiceStopped(serviceName, 6*time.Second)
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	for _, status := range statuses {
@@ -207,6 +210,95 @@ func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 		}
 	}
 	waitForEnter()
+}
+
+// waitForServiceStopped 轮询等待系统服务彻底进入停止状态，避免进程句柄尚未释放导致文件被锁
+func waitForServiceStopped(serviceName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, err := platform.ServiceRunning(serviceName)
+		if err == nil && !running {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Errorf("等待服务 %s 停止超时", serviceName)
+}
+
+// UpdateResult 封装应用升级与服务恢复状态
+type UpdateResult struct {
+	AppName        string `json:"app_name"`
+	OldVersion     string `json:"old_version"`
+	NewVersion     string `json:"new_version"`
+	ServiceRunning bool   `json:"service_running"`
+	ServiceError   string `json:"service_error,omitempty"`
+}
+
+// UpdateAppByName 执行指定名称应用的自动更新流程，支持单个应用 (如 "llama-swap" / "llama.cpp")
+func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateResult, error) {
+	var targetApp *ManagedApp
+	for i := range ManagedApps {
+		if strings.EqualFold(ManagedApps[i].Name, appName) {
+			targetApp = &ManagedApps[i]
+			break
+		}
+	}
+	if targetApp == nil {
+		return nil, fmt.Errorf("未找到受管应用: %s", appName)
+	}
+
+	status := InspectApp(*targetApp)
+	if status.Path == "" {
+		return nil, fmt.Errorf("本地未找到 %s 可执行文件，无法执行更新", targetApp.Name)
+	}
+	if status.CheckErr != nil {
+		return nil, fmt.Errorf("检查最新版本失败: %w", status.CheckErr)
+	}
+	if !force && !status.NeedsUpdate() {
+		return nil, fmt.Errorf("%s 当前已是最新版本 (%s)", targetApp.Name, status.LocalVersion)
+	}
+
+	oldVer := status.LocalVersion
+	newVer := status.Release.TagName
+
+	serviceWasRunning, _ := platform.ServiceRunning(serviceName)
+	if serviceWasRunning {
+		fmt.Printf("正在暂停 %s 服务以安全更新 %s...\n", serviceName, targetApp.Name)
+		if err := platform.StopService(serviceName); err != nil {
+			return nil, fmt.Errorf("暂停系统服务失败: %w", err)
+		}
+		if err := waitForServiceStopped(serviceName, 6*time.Second); err != nil {
+			fmt.Printf("警告: %v，继续尝试更新\n", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	fmt.Printf("[Web触发更新] 正在升级 %s %s -> %s\n", targetApp.Name, oldVer, newVer)
+	if err := InstallRelease(status); err != nil {
+		if serviceWasRunning {
+			_ = platform.StartService(serviceName)
+		}
+		return nil, fmt.Errorf("安装更新失败: %w", err)
+	}
+
+	result := &UpdateResult{
+		AppName:        targetApp.Name,
+		OldVersion:     oldVer,
+		NewVersion:     newVer,
+		ServiceRunning: false,
+	}
+
+	if serviceWasRunning {
+		fmt.Printf("正在恢复 %s 服务...\n", serviceName)
+		if err := platform.StartService(serviceName); err != nil {
+			result.ServiceRunning = false
+			result.ServiceError = fmt.Sprintf("服务拉起失败: %v", err)
+		} else {
+			result.ServiceRunning = true
+		}
+	}
+
+	return result, nil
 }
 
 // InspectApp 检查指定受管应用程序的本地状态和云端最新版本

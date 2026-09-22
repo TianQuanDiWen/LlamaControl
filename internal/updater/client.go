@@ -55,9 +55,17 @@ func FetchLatestRelease(app ManagedApp) (GithubRelease, error) {
 	return release, nil
 }
 
-// DownloadWithProgress 带控制台进度条的下载器，将 URL 下载到指定本地路径
-func DownloadWithProgress(url, path string) error {
+// DownloadWithProgress 带控制台进度条的下载器，将 URL 下载到指定本地路径（支持镜像加速 fallback，失败时自动清理残缺文件）
+func DownloadWithProgress(url, path string) (downloadErr error) {
 	resp, err := DownloadClient.Get(url)
+	if (err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300) && !strings.HasPrefix(url, "https://ghproxy.net/") {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		mirrorURL := "https://ghproxy.net/" + url
+		fmt.Printf("\n直连下载异常，正在尝试加速镜像: %s\n", mirrorURL)
+		resp, err = DownloadClient.Get(mirrorURL)
+	}
 	if err != nil {
 		return err
 	}
@@ -65,16 +73,30 @@ func DownloadWithProgress(url, path string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("下载失败，HTTP %d", resp.StatusCode)
 	}
+
 	file, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+		if downloadErr != nil {
+			_ = os.Remove(path)
+		}
+	}()
+
 	written, err := io.Copy(file, &progressReader{reader: resp.Body, total: resp.ContentLength})
-	if err == nil {
-		fmt.Printf("\r已下载 %s                         \n", FormatBytes(written))
+	if err != nil {
+		downloadErr = err
+		return err
 	}
-	return err
+	if resp.ContentLength > 0 && written < resp.ContentLength {
+		downloadErr = fmt.Errorf("下载未完成: 预期 %d 字节，实际仅获取 %d 字节", resp.ContentLength, written)
+		return downloadErr
+	}
+
+	fmt.Printf("\r已下载 %s                         \n", FormatBytes(written))
+	return nil
 }
 
 type progressReader struct {
