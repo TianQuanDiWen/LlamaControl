@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -210,40 +211,46 @@ var (
 	updateLock   sync.Mutex
 )
 
-// getOrFetchAppVersions 按需读取版本信息：
-// - 本地版本：每次实时本地快速探测；
-// - 云端版本：若在 15 分钟内且 !force，使用缓存；若已超时或 force，向 GitHub 获取最新 Release 并刷新缓存。
-func getOrFetchAppVersions(force bool) []AppInfo {
+// getCurrentAppInfos 仅从本地二进制探测与只读内存缓存中组装版本数据，绝不发起任何网络 I/O，毫秒级即时返回
+func getCurrentAppInfos() []AppInfo {
 	appCacheMu.RLock()
 	cached := appCacheList
-	updatedAt := appCacheTime
 	appCacheMu.RUnlock()
 
-	now := time.Now()
-	useCache := !force && len(cached) > 0 && now.Sub(updatedAt) < 15*time.Minute
-
-	if useCache {
-		var result []AppInfo
-		for _, item := range cached {
-			for _, app := range updater.ManagedApps {
-				if app.Name == item.Name {
-					_, localVer, variant := updater.InspectLocalBinary(app)
-					needsUpdate := localVer != "" && localVer != "unknown" && item.RemoteVersion != "" && updater.CompareVersions(localVer, item.RemoteVersion) < 0
-					result = append(result, AppInfo{
-						Name:          app.Name,
-						LocalVersion:  localVer,
-						RemoteVersion: item.RemoteVersion,
-						Variant:       variant,
-						NeedsUpdate:   needsUpdate,
-					})
-					break
-				}
-			}
-		}
-		return result
+	cacheMap := make(map[string]string, len(cached))
+	for _, item := range cached {
+		cacheMap[item.Name] = item.RemoteVersion
 	}
 
-	// 缓存过期或显式强制刷新，向 GitHub 请求最新版本
+	var result []AppInfo
+	for _, app := range updater.ManagedApps {
+		_, localVer, variant := updater.InspectLocalBinary(app)
+		remoteVer := cacheMap[app.Name]
+		needsUpdate := localVer != "" && localVer != "unknown" && remoteVer != "" && updater.CompareVersions(localVer, remoteVer) < 0
+		result = append(result, AppInfo{
+			Name:          app.Name,
+			LocalVersion:  localVer,
+			RemoteVersion: remoteVer,
+			Variant:       variant,
+			NeedsUpdate:   needsUpdate,
+		})
+	}
+	return result
+}
+
+// getOrFetchAppVersions 按需读取或刷新云端版本信息：
+// - 若 !force 且 15 分钟内已有缓存，直接复用当前缓存；
+// - 若已超时或 force，向 GitHub 获取最新 Release 并刷新缓存。
+func getOrFetchAppVersions(force bool) []AppInfo {
+	appCacheMu.RLock()
+	hasCache := len(appCacheList) > 0
+	isFresh := time.Since(appCacheTime) < 15*time.Minute
+	appCacheMu.RUnlock()
+
+	if !force && hasCache && isFresh {
+		return getCurrentAppInfos()
+	}
+
 	var fresh []AppInfo
 	for _, app := range updater.ManagedApps {
 		status := updater.InspectApp(app)
@@ -259,7 +266,7 @@ func getOrFetchAppVersions(force bool) []AppInfo {
 
 	appCacheMu.Lock()
 	appCacheList = fresh
-	appCacheTime = now
+	appCacheTime = time.Now()
 	appCacheMu.Unlock()
 
 	return fresh
@@ -275,8 +282,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	running, _ := platform.ServiceRunning(s.cfg.ServiceName)
 	listening, _ := platform.PortListening(s.cfg.SwapPort)
 
-	// 获取受管应用状态 (按需懒加载，15分钟缓存避免GitHub限流)
-	apps := getOrFetchAppVersions(false)
+	// 本地状态查询与网络 I/O 彻底解耦：从本地探测与内存缓存中毫秒级返回
+	apps := getCurrentAppInfos()
 
 	resp := StatusResponse{
 		Platform:      platform.PlatformName(),
@@ -300,7 +307,8 @@ func (s *Server) handleCheckApps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	apps := getOrFetchAppVersions(true)
+	force := r.URL.Query().Get("force") == "true"
+	apps := getOrFetchAppVersions(force)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":   true,
@@ -345,7 +353,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := updater.UpdateAppByName(req.App, s.cfg.ServiceName, req.Force)
+	result, err := updater.UpdateAppByName(req.App, s.cfg.ServiceName, req.Force)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -357,9 +365,25 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 
 	// 升级成功后，强制刷新版本缓存
 	getOrFetchAppVersions(true)
+
+	// 若二进制升级成功但服务拉起失败，如实返回 warning 状态
+	if result != nil && result.ServiceError != "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":              true,
+			"warning":         true,
+			"service_running": false,
+			"result":          result,
+			"msg":             fmt.Sprintf("%s 升级成功至 %s，但服务启动失败: %s。请在控制面板手动尝试启动服务。", result.AppName, result.NewVersion, result.ServiceError),
+		})
+		return
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":  true,
-		"msg": fmt.Sprintf("%s 升级成功并已就绪！", req.App),
+		"ok":              true,
+		"warning":         false,
+		"service_running": result != nil && result.ServiceRunning,
+		"result":          result,
+		"msg":             fmt.Sprintf("%s 升级成功并已就绪！(%s -> %s)", result.AppName, result.OldVersion, result.NewVersion),
 	})
 }
 
@@ -422,6 +446,94 @@ func (s *Server) handleCleanLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// readTailLines 从文件末尾倒序分块读取最多 maxLines 行，避免大日志文件导致内存溢出
+func readTailLines(filePath string, maxLines int) (string, error) {
+	if maxLines <= 0 {
+		maxLines = 100
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	fileSize := stat.Size()
+	if fileSize == 0 {
+		return "", nil
+	}
+
+	const chunkSize = int64(8192)
+	var (
+		offset    = fileSize
+		buf       = make([]byte, chunkSize)
+		collected []byte
+	)
+
+	for offset > 0 {
+		readSize := chunkSize
+		if offset < chunkSize {
+			readSize = offset
+		}
+		offset -= readSize
+
+		_, err := file.Seek(offset, io.SeekStart)
+		if err != nil {
+			return "", err
+		}
+
+		n, err := io.ReadFull(file, buf[:readSize])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return "", err
+		}
+
+		// 安全合并 chunk 到头部，避免切片底层数组别名污染
+		newCollected := make([]byte, n+len(collected))
+		copy(newCollected, buf[:n])
+		copy(newCollected[n:], collected)
+		collected = newCollected
+
+		// 统计当前所含行数
+		trimmed := collected
+		if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\n' {
+			trimmed = trimmed[:len(trimmed)-1]
+		}
+		newlines := 0
+		for i := 0; i < len(trimmed); i++ {
+			if trimmed[i] == '\n' {
+				newlines++
+			}
+		}
+		lineCount := 0
+		if len(trimmed) > 0 {
+			lineCount = newlines + 1
+		}
+		if lineCount >= maxLines {
+			break
+		}
+	}
+
+	content := string(collected)
+	lines := strings.Split(content, "\n")
+	hasTrailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+		hasTrailingNewline = true
+	}
+
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	res := strings.Join(lines, "\n")
+	if hasTrailingNewline {
+		res += "\n"
+	}
+	return res, nil
+}
+
 // readLatestLogs 读取 logDir 下最新日志文件的最后 N 行
 func (s *Server) readLatestLogs(maxLines int) string {
 	if s.cfg.LogDir == "" {
@@ -451,16 +563,14 @@ func (s *Server) readLatestLogs(maxLines int) string {
 	})
 
 	latestPath := filepath.Join(s.cfg.LogDir, logFiles[0].Name())
-	data, err := os.ReadFile(latestPath)
+	logs, err := readTailLines(latestPath, maxLines)
 	if err != nil {
 		return fmt.Sprintf("读取日志文件失败: %v", err)
 	}
-
-	lines := strings.Split(string(data), "\n")
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+	if logs == "" {
+		return "暂无日志内容"
 	}
-	return strings.Join(lines, "\n")
+	return logs
 }
 
 // Start 启动 HTTP 监听

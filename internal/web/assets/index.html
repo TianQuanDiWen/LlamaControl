@@ -4,24 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LlamaControl 管理面板</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: { 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
-          }
-        }
-      }
-    }
-  </script>
-  <style>
-    /* 隐藏滚动条但保留功能 */
-    .no-scrollbar::-webkit-scrollbar { display: none; }
-    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  </style>
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-indigo-500 selection:text-white">
 
@@ -324,7 +307,7 @@
               <div class="mt-4 pt-3 border-t border-slate-800/60 flex items-center justify-between">
                 ${hasNewVer ? `
                   <button onclick="updateApp('${app.name}')" id="btn-update-${app.name}" class="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center space-x-1.5">
-                    <span>🚀 独立升级至 ${app.remote_version}</span>
+                    <span>🚀 升级至 ${app.remote_version}</span>
                   </button>
                 ` : `
                   <span class="text-xs text-emerald-400/90 flex items-center space-x-1">
@@ -351,30 +334,33 @@
       }
     }
 
-    async function checkUpdates() {
+    async function checkUpdates(force = true) {
       const btn = document.getElementById('btn-check-updates');
       const icon = document.getElementById('check-update-icon');
       const text = document.getElementById('check-update-text');
-      if (btn) btn.disabled = true;
-      if (icon) icon.className = 'inline-block animate-spin';
-      if (text) text.innerText = '正在检查...';
+      if (force && btn) btn.disabled = true;
+      if (force && icon) icon.className = 'inline-block animate-spin';
+      if (force && text) text.innerText = '正在检查...';
 
       try {
-        showToast('正在向 GitHub 查询最新版本...', true);
-        const res = await fetch('/api/apps/check', { method: 'POST' });
+        if (force) showToast('正在向 GitHub 查询最新版本...', true);
+        const url = force ? '/api/apps/check?force=true' : '/api/apps/check';
+        const res = await fetch(url, { method: 'POST' });
         const data = await res.json();
         if (data.ok) {
-          showToast(data.msg || '最新版本检查完成', true);
+          if (force) showToast(data.msg || '最新版本检查完成', true);
           await fetchStatus();
-        } else {
+        } else if (force) {
           showToast(data.msg || '检查更新失败', false);
         }
       } catch (err) {
-        showToast(`请求异常: ${err}`, false);
+        if (force) showToast(`请求异常: ${err}`, false);
       } finally {
-        if (btn) btn.disabled = false;
-        if (icon) icon.className = '';
-        if (text) text.innerText = '检查最新版本';
+        if (force) {
+          if (btn) btn.disabled = false;
+          if (icon) icon.className = '';
+          if (text) text.innerText = '检查最新版本';
+        }
       }
     }
 
@@ -408,7 +394,12 @@
         });
         const data = await res.json();
         if (data.ok) {
-          showToast(data.msg || `${appName} 升级成功！`, true);
+          if (data.warning) {
+            showToast(data.msg, false);
+            alert(data.msg);
+          } else {
+            showToast(data.msg || `${appName} 升级成功！`, true);
+          }
           await fetchStatus();
         } else {
           showToast(data.msg || '升级失败', false);
@@ -469,8 +460,9 @@
       }
     }
 
-    // 轮询状态
+    // 初始化与轮询：进入页面即时拉取本地状态，后台同步版本缓存（<15分钟直接复用缓存）
     fetchStatus();
+    checkUpdates(false);
     setInterval(fetchStatus, 4000);
 
     // 日志自动刷新
