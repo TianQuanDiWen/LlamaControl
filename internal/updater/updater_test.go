@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +163,13 @@ func TestDownloadWithProgressCleansUpOnFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(goodPath); statErr != nil {
 		t.Fatalf("expected good file to exist, got: %v", statErr)
+	}
+}
+
+func TestUpdateAppByName_NotFound(t *testing.T) {
+	_, err := UpdateAppByName("non-existent-app-12345", "test-svc", false)
+	if err == nil || !strings.Contains(err.Error(), "未找到受管应用") {
+		t.Errorf("expected error for nonexistent app, got: %v", err)
 	}
 }
 

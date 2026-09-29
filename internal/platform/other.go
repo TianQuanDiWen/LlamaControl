@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 )
 
 // IsSupported 判断当前平台是否完全支持服务及管理操作
@@ -71,3 +72,11 @@ func UninstallService(string) error                                             
 func RunAsService(serviceName string, runFn func(ctx context.Context) error) error { return unsupported() }
 
 func isNativeService() bool { return false }
+
+// KillProcessTree 强制终止指定 PID 及其所有子进程
+func KillProcessTree(pid int) {
+	if pid > 0 {
+		_ = exec.Command("pkill", "-P", strconv.Itoa(pid)).Run()
+		_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
+	}
+}

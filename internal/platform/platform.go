@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"llama-control/internal/config"
@@ -85,8 +86,71 @@ func FormatVariant(variant string) string {
 	}
 }
 
+// ValidateServiceName 严格校验服务名称，仅允许字母、数字、下划线和连字符，防止命令拼接注入
+func ValidateServiceName(name string) error {
+	if len(name) == 0 || len(name) > 64 {
+		return fmt.Errorf("服务名称长度必须在 1-64 字符之间")
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return fmt.Errorf("服务名称包含非法字符: %q (仅允许字母、数字、_、-)", name)
+		}
+	}
+	return nil
+}
+
 // WorkerHook 随守护服务一同启动的附加后台任务（如伴随 Web 控制台）
 type WorkerHook func(ctx context.Context, swapPort int, configFile, logDir string)
+
+var (
+	workerStateMu sync.Mutex
+	isWorkerMode  bool
+	swapCmd       *exec.Cmd
+	swapCancel    context.CancelFunc
+	swapPaused    bool
+	swapResumeCh  = make(chan struct{}, 1)
+)
+
+// IsWorkerMode 检查当前是否在后台服务工作进程内部运行
+func IsWorkerMode() bool {
+	workerStateMu.Lock()
+	defer workerStateMu.Unlock()
+	return isWorkerMode
+}
+
+// PauseSwapProcess 暂停 swap 守护监控并终止当前正在运行的 swap 进程以释放文件锁
+func PauseSwapProcess() error {
+	workerStateMu.Lock()
+	swapPaused = true
+	var pid int
+	if swapCmd != nil && swapCmd.Process != nil {
+		pid = swapCmd.Process.Pid
+	}
+	cancel := swapCancel
+	workerStateMu.Unlock()
+
+	// 幂等触发取消，瞬时打断可能正在运行的进程或 3 秒自愈冷却睡眠
+	if cancel != nil {
+		cancel()
+	}
+	if pid > 0 {
+		KillProcessTree(pid)
+	}
+	return nil
+}
+
+// ResumeSwapProcess 恢复 swap 守护监控并立即唤醒自愈循环拉起最新的 swap 进程
+func ResumeSwapProcess() error {
+	workerStateMu.Lock()
+	swapPaused = false
+	workerStateMu.Unlock()
+
+	select {
+	case swapResumeCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
 
 // HandleServiceWorker 检查当前进程是否由原生系统服务管理器唤醒或带有 --service-worker 标记
 func HandleServiceWorker(serviceName string, hasWorkerFlag bool, hooks ...WorkerHook) bool {
@@ -99,6 +163,10 @@ func HandleServiceWorker(serviceName string, hasWorkerFlag bool, hooks ...Worker
 
 // runServiceWorker 在后台作为守护进程运行，管理并自愈 llama-swap 子进程
 func runServiceWorker(serviceName string, hooks ...WorkerHook) {
+	workerStateMu.Lock()
+	isWorkerMode = true
+	workerStateMu.Unlock()
+
 	err := RunAsService(serviceName, func(ctx context.Context) error {
 		exeDir := ExecutableDir()
 		var candidates []string
@@ -165,23 +233,57 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 			default:
 			}
 
-			cmd := exec.CommandContext(ctx, swapPath, "-config", configFile, "-listen", fmt.Sprintf(":%d", port))
+			// 若处于升级或维护暂停状态，休眠等待恢复信号
+			workerStateMu.Lock()
+			for swapPaused {
+				workerStateMu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-swapResumeCh:
+				}
+				workerStateMu.Lock()
+			}
+
+			runCtx, runCancel := context.WithCancel(ctx)
+			cmd := exec.CommandContext(runCtx, swapPath, "-config", configFile, "-listen", fmt.Sprintf(":%d", port))
 			cmd.Dir = appDir
 			cmd.Stdout = dailyLogger
 			cmd.Stderr = dailyLogger
+			swapCmd = cmd
+			swapCancel = runCancel
+			workerStateMu.Unlock()
 
 			_ = cmd.Run()
+
+			runCancel()
+
+			workerStateMu.Lock()
+			swapCmd = nil
+			swapCancel = nil
+			isPaused := swapPaused
+			workerStateMu.Unlock()
 
 			if ctx.Err() != nil {
 				return nil // 收到服务停止信号，正常退出
 			}
 
-			// 进程异常闪退，等待 3 秒后自动自愈拉起
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(3 * time.Second):
+			if isPaused {
+				continue
 			}
+
+			// 进程异常退出，等待 3 秒后自愈拉起（通过 sleepCtx 支持随时被 PauseSwapProcess 打断）
+			sleepCtx, sleepCancel := context.WithTimeout(ctx, 3*time.Second)
+			workerStateMu.Lock()
+			swapCancel = sleepCancel
+			workerStateMu.Unlock()
+
+			<-sleepCtx.Done()
+
+			sleepCancel()
+			workerStateMu.Lock()
+			swapCancel = nil
+			workerStateMu.Unlock()
 		}
 	})
 	if err != nil {

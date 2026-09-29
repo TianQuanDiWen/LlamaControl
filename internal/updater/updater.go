@@ -261,8 +261,17 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 	oldVer := status.LocalVersion
 	newVer := status.Release.TagName
 
+	isWorker := platform.IsWorkerMode()
 	serviceWasRunning, _ := platform.ServiceRunning(serviceName)
-	if serviceWasRunning {
+
+	if isWorker {
+		// 当前在后台服务主进程（Web 控制台）内部：
+		// 仅暂停并关闭 swap 子进程，释放二进制与显卡动态库锁，控制面板保持在线
+		fmt.Printf("[热更新] 正在暂停 %s 子进程并释放文件锁...\n", targetApp.Name)
+		_ = platform.PauseSwapProcess()
+		time.Sleep(200 * time.Millisecond)
+	} else if serviceWasRunning {
+		// 外部独立进程调用：停止外部守护服务
 		fmt.Printf("正在暂停 %s 服务以安全更新 %s...\n", serviceName, targetApp.Name)
 		if err := platform.StopService(serviceName); err != nil {
 			return nil, fmt.Errorf("暂停系统服务失败: %w", err)
@@ -273,9 +282,11 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	fmt.Printf("[Web触发更新] 正在升级 %s %s -> %s\n", targetApp.Name, oldVer, newVer)
+	fmt.Printf("[升级执行] 正在升级 %s %s -> %s\n", targetApp.Name, oldVer, newVer)
 	if err := InstallRelease(status); err != nil {
-		if serviceWasRunning {
+		if isWorker {
+			_ = platform.ResumeSwapProcess()
+		} else if serviceWasRunning {
 			_ = platform.StartService(serviceName)
 		}
 		return nil, fmt.Errorf("安装更新失败: %w", err)
@@ -288,7 +299,10 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 		ServiceRunning: false,
 	}
 
-	if serviceWasRunning {
+	if isWorker {
+		_ = platform.ResumeSwapProcess()
+		result.ServiceRunning = true
+	} else if serviceWasRunning {
 		fmt.Printf("正在恢复 %s 服务...\n", serviceName)
 		if err := platform.StartService(serviceName); err != nil {
 			result.ServiceRunning = false
