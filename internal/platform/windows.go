@@ -61,9 +61,7 @@ func StartService(name string) error { return StreamCommand("net", "start", name
 // StopService 停止指定的 Windows 系统服务
 func StopService(name string) error  { return StreamCommand("net", "stop", name) }
 
-// RestartService 重启指定的 Windows 系统服务。
-// - 若当前处于 Worker 内部（如由内嵌 Web 控制台触发）：采用后台独立进程脱壳执行，避免切断自身正在响应的 HTTP 连接；
-// - 若在 CLI 交互终端中调用：执行原生同步启停（Stop -> Start），确保终端用户获得真实的执行耗时与错误反馈。
+// RestartService 原生同步重启指定的 Windows 系统服务
 func RestartService(name string) error {
 	if err := ValidateServiceName(name); err != nil {
 		return err
@@ -77,21 +75,6 @@ func RestartService(name string) error {
 		return StartService(name)
 	}
 
-	// 1. 若当前处于 Worker 模式内部，派生独立脱壳进程，延迟 1 秒后重启，确保 HTTP 响应可安全发出
-	if IsWorkerMode() {
-		cmdStr := fmt.Sprintf("ping 127.0.0.1 -n 2 >nul & net stop \"%s\" & net start \"%s\"", name, name)
-		cmd := exec.Command("cmd.exe", "/C", cmdStr)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			HideWindow:    true,
-			CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-		}
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("启动后台重启任务失败: %w", err)
-		}
-		return nil
-	}
-
-	// 2. 终端 CLI 交互调用：保持严格同步执行与错误回传
 	if err := StopService(name); err != nil {
 		return fmt.Errorf("重启时停止服务失败: %v", err)
 	}

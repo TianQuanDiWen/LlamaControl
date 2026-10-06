@@ -410,8 +410,13 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		err = platform.StopService(s.cfg.ServiceName)
 		msg = "服务停止指令已发送"
 	case "restart":
-		err = platform.RestartService(s.cfg.ServiceName)
-		msg = "服务重启指令已发送"
+		if platform.IsWorkerMode() {
+			_ = platform.RestartSwapProcess()
+			msg = "llama-swap 核心业务进程已成功重启"
+		} else {
+			err = platform.RestartService(s.cfg.ServiceName)
+			msg = "服务重启指令已发送"
+		}
 	default:
 		http.Error(w, "Unknown Action", http.StatusBadRequest)
 		return

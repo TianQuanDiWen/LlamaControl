@@ -57,9 +57,7 @@ func StopService(name string) error {
 	return StreamCommand("launchctl", "stop", "com."+name)
 }
 
-// RestartService 重启指定的 macOS 守护服务。
-// - 若当前处于 Worker 内部（如由内嵌 Web 控制台触发）：采用后台独立进程脱壳执行，避免切断自身正在响应的 HTTP 连接；
-// - 若在 CLI 交互终端中调用：执行原生同步启停（Stop -> Start），确保终端用户获得真实的执行耗时与错误反馈。
+// RestartService 原生同步重启指定的 macOS 守护服务
 func RestartService(name string) error {
 	if err := ValidateServiceName(name); err != nil {
 		return err
@@ -71,15 +69,6 @@ func RestartService(name string) error {
 	}
 	if !running {
 		return StartService(name)
-	}
-
-	if IsWorkerMode() {
-		cmdStr := fmt.Sprintf("sleep 1 && launchctl stop com.%s && launchctl start com.%s", name, name)
-		cmd := exec.Command("sh", "-c", cmdStr)
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("启动后台重启任务失败: %w", err)
-		}
-		return nil
 	}
 
 	if err := StopService(name); err != nil {

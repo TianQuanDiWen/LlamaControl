@@ -62,3 +62,21 @@ func TestPauseAndResumeSwapProcess(t *testing.T) {
 		t.Errorf("expected swapPaused to be false after resume")
 	}
 }
+
+func TestRestartSwapProcess(t *testing.T) {
+	if err := RestartSwapProcess(); err != nil {
+		t.Fatalf("unexpected error restarting swap: %v", err)
+	}
+
+	workerStateMu.Lock()
+	restarting := swapRestarting
+	workerStateMu.Unlock()
+	if !restarting {
+		t.Errorf("expected swapRestarting to be true after restart requested")
+	}
+
+	// 清理测试标记
+	workerStateMu.Lock()
+	swapRestarting = false
+	workerStateMu.Unlock()
+}

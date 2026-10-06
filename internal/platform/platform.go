@@ -103,12 +103,13 @@ func ValidateServiceName(name string) error {
 type WorkerHook func(ctx context.Context, swapPort int, configFile, logDir string)
 
 var (
-	workerStateMu sync.Mutex
-	isWorkerMode  bool
-	swapCmd       *exec.Cmd
-	swapCancel    context.CancelFunc
-	swapPaused    bool
-	swapResumeCh  = make(chan struct{}, 1)
+	workerStateMu  sync.Mutex
+	isWorkerMode   bool
+	swapCmd        *exec.Cmd
+	swapCancel     context.CancelFunc
+	swapPaused     bool
+	swapRestarting bool
+	swapResumeCh   = make(chan struct{}, 1)
 )
 
 // IsWorkerMode 检查当前是否在后台服务工作进程内部运行
@@ -148,6 +149,27 @@ func ResumeSwapProcess() error {
 	select {
 	case swapResumeCh <- struct{}{}:
 	default:
+	}
+	return nil
+}
+
+// RestartSwapProcess 立即重启受管的 llama-swap 进程（原子重置标记，跳过 3 秒自愈冷却并清理残留信标）
+func RestartSwapProcess() error {
+	workerStateMu.Lock()
+	swapRestarting = true
+	var pid int
+	if swapCmd != nil && swapCmd.Process != nil {
+		pid = swapCmd.Process.Pid
+	}
+	cancel := swapCancel
+	workerStateMu.Unlock()
+
+	// 幂等触发取消，瞬时打断运行中进程或 3 秒休眠，进入即刻重启
+	if cancel != nil {
+		cancel()
+	}
+	if pid > 0 {
+		KillProcessTree(pid)
 	}
 	return nil
 }
@@ -244,14 +266,23 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 				}
 				workerStateMu.Lock()
 			}
+			workerStateMu.Unlock()
+
+			// 清理多余残留的唤醒信标，防止后续误触发
+			select {
+			case <-swapResumeCh:
+			default:
+			}
 
 			runCtx, runCancel := context.WithCancel(ctx)
 			cmd := exec.CommandContext(runCtx, swapPath, "-config", configFile, "-listen", fmt.Sprintf(":%d", port))
 			cmd.Dir = appDir
 			cmd.Stdout = dailyLogger
 			cmd.Stderr = dailyLogger
+			workerStateMu.Lock()
 			swapCmd = cmd
 			swapCancel = runCancel
+			swapRestarting = false // 新进程开始执行，原子重置重启标记
 			workerStateMu.Unlock()
 
 			_ = cmd.Run()
@@ -262,17 +293,19 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 			swapCmd = nil
 			swapCancel = nil
 			isPaused := swapPaused
+			isRestarting := swapRestarting
+			swapRestarting = false
 			workerStateMu.Unlock()
 
 			if ctx.Err() != nil {
 				return nil // 收到服务停止信号，正常退出
 			}
 
-			if isPaused {
+			if isPaused || isRestarting {
 				continue
 			}
 
-			// 进程异常退出，等待 3 秒后自愈拉起（通过 sleepCtx 支持随时被 PauseSwapProcess 打断）
+			// 进程异常退出，等待 3 秒后自愈拉起（通过 sleepCtx 支持随时被 PauseSwapProcess / RestartSwapProcess 打断）
 			sleepCtx, sleepCancel := context.WithTimeout(ctx, 3*time.Second)
 			workerStateMu.Lock()
 			swapCancel = sleepCancel
