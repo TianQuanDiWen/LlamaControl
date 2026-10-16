@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -74,7 +76,7 @@ func ExtractZipPackage(archivePath, destDir string, targetNames []string) (strin
 	return filepath.Join(destDir, targetBase), nil
 }
 
-// ExtractTarPackage 处理 .tar.gz 压缩包：在包中搜寻目标可执行文件所在的路径，并将该路径下的所有文件解压出来
+// ExtractTarPackage 处理 .tar.gz 压缩包：在包中搜寻目标可执行文件所在的路径，并将该路径下的所有文件及软链接解压出来
 func ExtractTarPackage(archivePath, destDir string, targetNames []string) (string, error) {
 	targetDir, targetBase, err := findTarTarget(archivePath, targetNames)
 	if err != nil {
@@ -95,15 +97,41 @@ func ExtractTarPackage(archivePath, destDir string, targetNames []string) (strin
 			return "", err
 		}
 		name := filepath.FromSlash(header.Name)
-		if header.Typeflag != tar.TypeReg || filepath.ToSlash(filepath.Dir(name)) != targetDir {
+		dir := filepath.Clean(filepath.ToSlash(filepath.Dir(name)))
+		if dir != targetDir {
 			continue
 		}
-		mode := os.FileMode(header.Mode)
-		if isTarget(name, targetNames) {
-			mode = mode | 0755
-		}
-		if err := WriteReader(filepath.Join(destDir, filepath.Base(name)), tarReader, mode); err != nil {
-			return "", err
+		dstPath := filepath.Join(destDir, filepath.Base(name))
+
+		switch header.Typeflag {
+		case tar.TypeReg, tar.TypeRegA:
+			mode := os.FileMode(header.Mode)
+			if isTarget(name, targetNames) || strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".so") {
+				mode = mode | 0755
+			}
+			// 必须清理可能存在的同名软链接，防止普通文件写入跟随已有链接导致越界覆写外部目标
+			_ = os.Remove(dstPath)
+			if err := WriteReader(dstPath, tarReader, mode); err != nil {
+				return "", err
+			}
+		case tar.TypeSymlink:
+			linkTarget := header.Linkname
+			// 1. 禁止绝对路径软链接（如 /etc/passwd 或 C:\Windows）
+			if filepath.IsAbs(linkTarget) || strings.HasPrefix(linkTarget, "/") || strings.HasPrefix(linkTarget, "\\") || (len(linkTarget) > 1 && linkTarget[1] == ':') {
+				return "", fmt.Errorf("非法软链接目标 (禁止绝对路径): %s -> %s", header.Name, linkTarget)
+			}
+			// 2. 校验软链接目标不得逃逸出 destDir
+			resolved := filepath.Clean(filepath.Join(destDir, linkTarget))
+			cleanDest := filepath.Clean(destDir)
+			rel, err := filepath.Rel(cleanDest, resolved)
+			if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+				return "", fmt.Errorf("非法软链接目标 (越界): %s -> %s", header.Name, linkTarget)
+			}
+			// 3. 安全创建软链接，严禁忽略创建失败的错误
+			_ = os.Remove(dstPath)
+			if err := os.Symlink(linkTarget, dstPath); err != nil {
+				return "", fmt.Errorf("创建软链接失败 (%s -> %s): %w", dstPath, linkTarget, err)
+			}
 		}
 	}
 	return filepath.Join(destDir, targetBase), nil
@@ -130,8 +158,9 @@ func findTarTarget(path string, targetNames []string) (string, string, error) {
 			return "", "", err
 		}
 		name := filepath.FromSlash(header.Name)
-		if header.Typeflag == tar.TypeReg && targets[strings.ToLower(filepath.Base(name))] {
-			return filepath.ToSlash(filepath.Dir(name)), filepath.Base(name), nil
+		isReg := header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA
+		if isReg && targets[strings.ToLower(filepath.Base(name))] {
+			return filepath.Clean(filepath.ToSlash(filepath.Dir(name))), filepath.Base(name), nil
 		}
 	}
 	return "", "", fmt.Errorf("压缩包中未找到目标程序 %s", strings.Join(targetNames, "/"))
@@ -156,6 +185,10 @@ func WriteReader(path string, reader io.Reader, mode os.FileMode) error {
 	perm := mode.Perm()
 	if perm == 0 {
 		perm = 0644
+	}
+	// 防御性保护：若目标路径为软链接，先将其移除，防止 OpenFile 跟随软链接截断或写入外部目标
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		_ = os.Remove(path)
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
@@ -217,6 +250,9 @@ func retryRename(src, dst string, maxAttempts int, interval time.Duration) error
 
 // ReplacePackageSafely 事务性原子替换目标目录下的程序及其依赖动态库，若验证失败自动回滚
 func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string) error) error {
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		return err
@@ -240,20 +276,44 @@ func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		}
 		name := entry.Name()
 		src, dst := filepath.Join(srcDir, name), filepath.Join(dstDir, name)
-		temp, err := os.CreateTemp(dstDir, ".llama-control-update-")
-		if err != nil {
-			rollback()
-			return err
+
+		isSymlink := entry.Type()&os.ModeSymlink != 0
+		var tempPath string
+		if isSymlink {
+			target, err := os.Readlink(src)
+			if err != nil {
+				rollback()
+				return err
+			}
+			tempFile, err := os.CreateTemp(dstDir, ".llama-control-symlink-")
+			if err != nil {
+				rollback()
+				return err
+			}
+			tempPath = tempFile.Name()
+			tempFile.Close()
+			_ = os.Remove(tempPath)
+			if err := os.Symlink(target, tempPath); err != nil {
+				rollback()
+				return err
+			}
+		} else {
+			temp, err := os.CreateTemp(dstDir, ".llama-control-update-")
+			if err != nil {
+				rollback()
+				return err
+			}
+			tempPath = temp.Name()
+			temp.Close()
+			if err := CopyFile(src, tempPath); err != nil {
+				os.Remove(tempPath)
+				rollback()
+				return err
+			}
 		}
-		tempPath := temp.Name()
-		temp.Close()
-		if err := CopyFile(src, tempPath); err != nil {
-			os.Remove(tempPath)
-			rollback()
-			return err
-		}
+
 		hadBackup := false
-		if _, err := os.Stat(dst); err == nil {
+		if _, err := os.Lstat(dst); err == nil {
 			if err := retryRename(dst, filepath.Join(backupDir, name), 5, 200*time.Millisecond); err != nil {
 				os.Remove(tempPath)
 				rollback()
@@ -272,10 +332,19 @@ func ReplacePackageSafely(srcDir, dstDir, executable string, verify func(string)
 		installed = append(installed, name)
 	}
 
-	// 确保目标可执行文件在 Unix/macOS 下拥有执行权限 (0755)
+	// 确保目标可执行文件与动态库在 Unix/macOS 下拥有执行权限 (0755)
+	for _, name := range installed {
+		p := filepath.Join(dstDir, name)
+		if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink == 0 {
+			if strings.EqualFold(name, executable) || strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".so") {
+				_ = os.Chmod(p, 0755)
+			}
+		}
+	}
+
 	targetExe := filepath.Join(dstDir, executable)
-	if info, err := os.Stat(targetExe); err == nil {
-		_ = os.Chmod(targetExe, info.Mode()|0755)
+	if runtime.GOOS == "darwin" {
+		_ = exec.Command("xattr", "-r", "-d", "com.apple.quarantine", dstDir).Run()
 	}
 
 	if err := verify(targetExe); err != nil {
