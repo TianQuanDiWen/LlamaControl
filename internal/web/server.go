@@ -181,6 +181,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/logs/clean", s.handleCleanLogs)
 	s.mux.HandleFunc("/api/apps/check", s.handleCheckApps)
 	s.mux.HandleFunc("/api/apps/update", s.handleUpdateApp)
+	s.mux.HandleFunc("/api/apps/progress", s.handleAppProgress)
 
 	// 5. 其余未命中的 /api/ 请求（如 llama-swap 原生 /api/models、/api/profiles 等）无缝转发给 swap
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -403,6 +404,21 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		"result":          result,
 		"msg":             successMsg,
 	})
+}
+
+func (s *Server) handleAppProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		http.Error(w, "Missing app parameter", http.StatusBadRequest)
+		return
+	}
+	progress := updater.GetProgress(appName)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(progress)
 }
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {

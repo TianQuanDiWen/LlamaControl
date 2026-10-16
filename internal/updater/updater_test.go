@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,5 +234,60 @@ func TestHasUpdatesOrInstalls(t *testing.T) {
 	}
 	if hasUpdatesOrInstalls(upToDate) {
 		t.Errorf("expected up to date app not to require update or install")
+	}
+}
+
+func TestProgressState(t *testing.T) {
+	app := "test-progress-app"
+	defer ClearProgress(app)
+
+	// 初始状态应为 idle
+	initP := GetProgress(app)
+	if initP.Stage != "idle" {
+		t.Errorf("expected stage 'idle', got %q", initP.Stage)
+	}
+
+	// 更新进度
+	SetProgress(app, "downloading", 250, 1000, nil)
+	p := GetProgress(app)
+	if p.Stage != "downloading" || p.Percent != 25 || p.ReadBytes != 250 || p.TotalBytes != 1000 {
+		t.Errorf("unexpected progress: %+v", p)
+	}
+
+	// 清理
+	ClearProgress(app)
+	pCleared := GetProgress(app)
+	if pCleared.Stage != "idle" {
+		t.Errorf("expected cleared stage 'idle', got %q", pCleared.Stage)
+	}
+}
+
+func TestUpdateAppByName_InvalidAppDoesNotPolluteProgress(t *testing.T) {
+	invalidApp := "invalid-app-xyz-not-exist"
+	_, err := UpdateAppByName(invalidApp, "mock-service", false)
+	if err == nil {
+		t.Fatalf("expected error for invalid app name")
+	}
+
+	p := GetProgress(invalidApp)
+	if p.Stage != "idle" {
+		t.Errorf("expected stage 'idle' for invalid app, got %q", p.Stage)
+	}
+}
+
+func TestProgressState_Warning(t *testing.T) {
+	app := "test-warning-app"
+	defer ClearProgress(app)
+
+	SetProgress(app, "warning", 100, 100, errors.New("service failed to restart"))
+	p := GetProgress(app)
+	if p.Stage != "warning" {
+		t.Errorf("expected stage 'warning', got %q", p.Stage)
+	}
+	if p.Percent != 100 {
+		t.Errorf("expected percent 100, got %d", p.Percent)
+	}
+	if p.ErrorMsg != "service failed to restart" {
+		t.Errorf("expected error msg 'service failed to restart', got %q", p.ErrorMsg)
 	}
 }

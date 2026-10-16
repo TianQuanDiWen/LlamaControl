@@ -342,3 +342,54 @@ func TestAppInfo_InstalledUnknownVersion(t *testing.T) {
 		t.Errorf("expected needs_update to be false when version is unknown, got true")
 	}
 }
+
+func TestWebAppsProgressAPI(t *testing.T) {
+	server := NewServer(Config{
+		ServiceName: "test-service",
+		SwapPort:    8080,
+		Addr:        "127.0.0.1:0",
+	})
+
+	// 1. 缺少 app 参数返回 400
+	reqMissing := httptest.NewRequest(http.MethodGet, "/api/apps/progress", nil)
+	wMissing := httptest.NewRecorder()
+	server.mux.ServeHTTP(wMissing, reqMissing)
+	if wMissing.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for missing app param, got %d", wMissing.Code)
+	}
+
+	// 2. 非 GET 方法返回 405
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/apps/progress?app=test", nil)
+	wPost := httptest.NewRecorder()
+	server.mux.ServeHTTP(wPost, reqPost)
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 for POST, got %d", wPost.Code)
+	}
+
+	// 3. 正常查询进度
+	updater.SetProgress("mock-test-app", "downloading", 512, 1024, nil)
+	defer updater.ClearProgress("mock-test-app")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/apps/progress?app=mock-test-app", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var progress updater.ProgressState
+	if err := json.Unmarshal(w.Body.Bytes(), &progress); err != nil {
+		t.Fatalf("failed to decode progress response: %v", err)
+	}
+
+	if progress.Stage != "downloading" {
+		t.Errorf("expected stage 'downloading', got %q", progress.Stage)
+	}
+	if progress.Percent != 50 {
+		t.Errorf("expected percent 50, got %d", progress.Percent)
+	}
+	if progress.ReadBytes != 512 || progress.TotalBytes != 1024 {
+		t.Errorf("expected 512/1024 bytes, got %d/%d", progress.ReadBytes, progress.TotalBytes)
+	}
+}

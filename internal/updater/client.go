@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,8 +56,73 @@ func FetchLatestRelease(app ManagedApp) (GithubRelease, error) {
 	return release, nil
 }
 
-// DownloadWithProgress 带控制台进度条的下载器，将 URL 下载到指定本地路径（支持镜像加速 fallback，失败时自动清理残缺文件）
-func DownloadWithProgress(url, path string) (downloadErr error) {
+// ProgressState 记录当前受管应用的下载与安装进度
+type ProgressState struct {
+	AppName    string `json:"app_name"`
+	Stage      string `json:"stage"` // "idle", "preparing", "downloading", "extracting", "completed", "warning", "error"
+	ReadBytes  int64  `json:"read_bytes"`
+	TotalBytes int64  `json:"total_bytes"`
+	Percent    int    `json:"percent"`
+	ErrorMsg   string `json:"error_msg,omitempty"`
+}
+
+var (
+	progressMu     sync.RWMutex
+	appProgressMap = make(map[string]ProgressState)
+)
+
+// SetProgress 更新指定应用的当前进度
+func SetProgress(appName, stage string, readBytes, totalBytes int64, err error) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	percent := 0
+	if totalBytes > 0 && readBytes > 0 {
+		percent = int(readBytes * 100 / totalBytes)
+		if percent > 100 {
+			percent = 100
+		}
+	}
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	}
+	appProgressMap[strings.ToLower(appName)] = ProgressState{
+		AppName:    appName,
+		Stage:      stage,
+		ReadBytes:  readBytes,
+		TotalBytes: totalBytes,
+		Percent:    percent,
+		ErrorMsg:   errMsg,
+	}
+}
+
+// GetProgress 读取指定应用的当前进度
+func GetProgress(appName string) ProgressState {
+	progressMu.RLock()
+	defer progressMu.RUnlock()
+	if state, ok := appProgressMap[strings.ToLower(appName)]; ok {
+		return state
+	}
+	return ProgressState{
+		AppName: appName,
+		Stage:   "idle",
+	}
+}
+
+// ClearProgress 清空指定应用的进度状态
+func ClearProgress(appName string) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	delete(appProgressMap, strings.ToLower(appName))
+}
+
+// DownloadWithProgress 带控制台进度条及可选回调的下载器，将 URL 下载到指定本地路径（支持镜像加速 fallback，失败时自动清理残缺文件）
+func DownloadWithProgress(url, path string, onProgress ...func(read, total int64)) (downloadErr error) {
+	var cb func(read, total int64)
+	if len(onProgress) > 0 {
+		cb = onProgress[0]
+	}
+
 	resp, err := DownloadClient.Get(url)
 	if (err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300) && !strings.HasPrefix(url, "https://ghproxy.net/") {
 		if resp != nil {
@@ -85,7 +151,7 @@ func DownloadWithProgress(url, path string) (downloadErr error) {
 		}
 	}()
 
-	written, err := io.Copy(file, &progressReader{reader: resp.Body, total: resp.ContentLength})
+	written, err := io.Copy(file, &progressReader{reader: resp.Body, total: resp.ContentLength, onProgress: cb})
 	if err != nil {
 		downloadErr = err
 		return err
@@ -95,6 +161,9 @@ func DownloadWithProgress(url, path string) (downloadErr error) {
 		return downloadErr
 	}
 
+	if cb != nil {
+		cb(written, resp.ContentLength)
+	}
 	fmt.Printf("\r已下载 %s                         \n", FormatBytes(written))
 	return nil
 }
@@ -102,12 +171,16 @@ func DownloadWithProgress(url, path string) (downloadErr error) {
 type progressReader struct {
 	reader      io.Reader
 	total, read int64
+	onProgress  func(read, total int64)
 }
 
-// Read 实现 io.Reader 并在读取时向控制台打印下载进度
+// Read 实现 io.Reader 并在读取时向控制台打印下载进度并通知回调
 func (p *progressReader) Read(buf []byte) (int, error) {
 	n, err := p.reader.Read(buf)
 	p.read += int64(n)
+	if p.onProgress != nil {
+		p.onProgress(p.read, p.total)
+	}
 	if p.total > 0 {
 		fmt.Printf("\r下载中... %3d%% (%s/%s)", p.read*100/p.total, FormatBytes(p.read), FormatBytes(p.total))
 	} else {

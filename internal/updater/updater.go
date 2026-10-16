@@ -261,7 +261,7 @@ type UpdateResult struct {
 }
 
 // UpdateAppByName 执行指定名称应用的安装/更新流程，支持单个应用 (如 "llama-swap" / "llama.cpp")
-func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateResult, error) {
+func UpdateAppByName(appName string, serviceName string, force bool) (result *UpdateResult, retErr error) {
 	var targetApp *ManagedApp
 	for i := range ManagedApps {
 		if strings.EqualFold(ManagedApps[i].Name, appName) {
@@ -272,6 +272,15 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 	if targetApp == nil {
 		return nil, fmt.Errorf("未找到受管应用: %s", appName)
 	}
+
+	canonicalName := targetApp.Name
+	// 仅在确认属于受管合法应用后重置状态，防止非法名称污染全局进度表
+	SetProgress(canonicalName, "preparing", 0, 0, nil)
+	defer func() {
+		if retErr != nil {
+			SetProgress(canonicalName, "error", 0, 0, retErr)
+		}
+	}()
 
 	status := InspectApp(*targetApp)
 	if status.CheckErr != nil {
@@ -338,7 +347,7 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 		return nil, fmt.Errorf("初始化配置失败: %w", err)
 	}
 
-	result := &UpdateResult{
+	result = &UpdateResult{
 		AppName:        targetApp.Name,
 		OldVersion:     oldVer,
 		NewVersion:     newVer,
@@ -358,6 +367,12 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 		}
 	}
 
+	// 完整操作就绪（文件替换、配置初始化、服务拉起）后，统一更新最终进度
+	if result.ServiceError != "" {
+		SetProgress(canonicalName, "warning", 100, 100, fmt.Errorf("%s", result.ServiceError))
+	} else {
+		SetProgress(canonicalName, "completed", 100, 100, nil)
+	}
 	return result, nil
 }
 
@@ -533,47 +548,74 @@ models:
 
 // InstallRelease 处理特定应用的下载、解包以及原目录原子替换验证
 func InstallRelease(status AppStatus) error {
+	appName := status.App.Name
+	SetProgress(appName, "downloading", 0, 0, nil)
+
 	asset, ok := SelectReleaseAsset(status.Release.Assets, status.App, status.Variant, runtime.GOOS, runtime.GOARCH)
 	if !ok {
-		return fmt.Errorf("未找到适合 %s/%s 的发布资源", runtime.GOOS, runtime.GOARCH)
+		err := fmt.Errorf("未找到适合 %s/%s 的发布资源", runtime.GOOS, runtime.GOARCH)
+		SetProgress(appName, "error", 0, 0, err)
+		return err
 	}
 	workDir, err := os.MkdirTemp("", "llama-control-update-*")
 	if err != nil {
+		SetProgress(appName, "error", 0, 0, err)
 		return err
 	}
 	defer os.RemoveAll(workDir)
 	downloadPath := filepath.Join(workDir, filepath.Base(asset.Name))
-	if err := DownloadWithProgress(asset.URL, downloadPath); err != nil {
+
+	progressCb := func(read, total int64) {
+		SetProgress(appName, "downloading", read, total, nil)
+	}
+
+	if err := DownloadWithProgress(asset.URL, downloadPath, progressCb); err != nil {
+		SetProgress(appName, "error", 0, 0, err)
 		return err
 	}
+
+	SetProgress(appName, "extracting", 100, 100, nil)
+
 	unpackDir := filepath.Join(workDir, "unpack")
 	if err := os.Mkdir(unpackDir, 0755); err != nil {
+		SetProgress(appName, "error", 0, 0, err)
 		return err
 	}
 	updated, err := fsutil.ExtractPackage(downloadPath, unpackDir, platform.ExecutableNames(status.App.BinaryBase))
 	if err != nil {
+		SetProgress(appName, "error", 0, 0, err)
 		return err
 	}
 	fmt.Println("  资源:", asset.Name)
 
 	targetDir := filepath.Dir(status.Path)
-	if status.Path == "" {
+	isFirstInstall := status.Path == ""
+	if isFirstInstall {
 		targetDir = DefaultInstallDir()
 	}
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("创建安装目录失败: %w", err)
+		err = fmt.Errorf("创建安装目录失败: %w", err)
+		SetProgress(appName, "error", 0, 0, err)
+		return err
 	}
 
-	return fsutil.ReplacePackageSafely(filepath.Dir(updated), targetDir, filepath.Base(updated), func(path string) error {
+	err = fsutil.ReplacePackageSafely(filepath.Dir(updated), targetDir, filepath.Base(updated), func(path string) error {
 		v := status.App.Parse(BinaryVersionOutput(path))
 		if v == "" {
-			return fmt.Errorf("安装/更新后无法读取版本")
+			return fmt.Errorf("安装/更新后无法读取版本 (程序可能缺少运行依赖或架构不匹配)")
 		}
 		if CompareVersions(v, status.Release.TagName) != 0 {
 			return fmt.Errorf("安装/更新后版本为 %s，预期 %s", v, status.Release.TagName)
 		}
 		return nil
 	})
+
+	if err != nil {
+		SetProgress(appName, "error", 0, 0, err)
+		return err
+	}
+
+	return nil
 }
 
 // waitForEnter 暂停执行以便用户可以观察终端信息

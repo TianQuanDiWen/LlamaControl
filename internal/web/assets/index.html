@@ -281,8 +281,8 @@
           }
         }
 
-        // 渲染受管应用卡片 (支持单独升级)
-        if (data.apps && data.apps.length > 0) {
+        // 渲染受管应用卡片 (支持单独升级，更新进行中跳过重绘以保护进度条)
+        if (data.apps && data.apps.length > 0 && !isUpdating) {
           const appHtml = data.apps.map(app => {
             const hasNewVer = app.needs_update;
             const isInstalled = app.is_installed;
@@ -379,6 +379,14 @@
       }
     }
 
+    function formatBytes(bytes) {
+      if (!bytes || bytes <= 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1) + ' ' + sizes[i];
+    }
+
     let isUpdating = false;
 
     async function updateApp(appName, force = false, isInstall = false) {
@@ -395,14 +403,59 @@
 
       isUpdating = true;
       const btn = document.getElementById(`btn-update-${appName}`);
-      const originalText = btn ? btn.innerHTML : '';
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = isInstall ? '<span>⏳ 正在下载并安装部署中...</span>' : '<span>⏳ 正在下载并替换中...</span>';
-        btn.className = 'w-full bg-slate-800 text-slate-400 text-xs py-2 px-3 rounded-xl flex items-center justify-center cursor-not-allowed';
+        btn.className = 'w-full relative overflow-hidden bg-slate-900 border border-indigo-500/50 text-white text-xs font-semibold py-2 px-3 rounded-xl flex items-center justify-center cursor-not-allowed shadow-inner';
+        btn.innerHTML = `
+          <div id="progress-bar-${appName}" class="absolute inset-y-0 left-0 h-full bg-indigo-600/80 transition-all duration-300 pointer-events-none" style="width: 0%;"></div>
+          <span id="progress-text-${appName}" class="relative z-10 flex items-center justify-center space-x-1.5 font-mono">⬇️ 正在连接并准备下载...</span>
+        `;
       }
 
       showToast(isInstall ? `正在下载并安装部署 ${appName} 到 bin/ 目录...` : `正在下载并安全替换 ${appName}，请勿关闭页面...`, true);
+
+      let pollActive = true;
+      const pollLoop = async () => {
+        if (!pollActive) return;
+        try {
+          const pRes = await fetch(`/api/apps/progress?app=${encodeURIComponent(appName)}`);
+          if (pRes.ok && pollActive) {
+            const pData = await pRes.json();
+            if (pollActive) {
+              const bar = document.getElementById(`progress-bar-${appName}`);
+              const text = document.getElementById(`progress-text-${appName}`);
+              if (bar && text) {
+                if (pData.stage === 'downloading') {
+                  const pct = pData.percent || 0;
+                  bar.style.width = `${pct}%`;
+                  if (pData.total_bytes > 0) {
+                    text.textContent = `⬇️ 下载中 ${pct}% (${formatBytes(pData.read_bytes)} / ${formatBytes(pData.total_bytes)})`;
+                  } else if (pData.read_bytes > 0) {
+                    text.textContent = `⬇️ 下载中 ${formatBytes(pData.read_bytes)}`;
+                  }
+                } else if (pData.stage === 'extracting') {
+                  bar.style.width = '100%';
+                  if (btn && !btn.classList.contains('animate-pulse')) {
+                    btn.classList.add('animate-pulse');
+                  }
+                  text.textContent = '📦 正在解压并部署至 bin/ ...';
+                } else if (pData.stage === 'warning') {
+                  bar.style.width = '100%';
+                  bar.className = 'absolute inset-y-0 left-0 h-full bg-amber-600/80 transition-all duration-300 pointer-events-none';
+                  if (btn) btn.classList.remove('animate-pulse');
+                  text.textContent = '⚠️ 部署完成 (服务未启动)';
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // 忽略轮询网络偶发异常
+        }
+        if (pollActive) {
+          setTimeout(pollLoop, 350);
+        }
+      };
+      pollLoop();
 
       try {
         const res = await fetch('/api/apps/update', {
@@ -411,26 +464,58 @@
           body: JSON.stringify({ app: appName, force: force })
         });
         const data = await res.json();
+        pollActive = false; // 立即终止轮询，忽略任何迟到的进度响应
+
+        const bar = document.getElementById(`progress-bar-${appName}`);
+        const text = document.getElementById(`progress-text-${appName}`);
+
         if (data.ok) {
+          if (btn) btn.classList.remove('animate-pulse');
+          if (bar) bar.style.width = '100%';
+
           if (data.warning) {
+            if (bar) {
+              bar.className = 'absolute inset-y-0 left-0 h-full bg-amber-600/80 transition-all duration-300 pointer-events-none';
+            }
+            if (text) text.textContent = '⚠️ 部署完成 (服务启动失败)';
             showToast(data.msg, false);
             alert(data.msg);
           } else {
+            if (bar) {
+              bar.className = 'absolute inset-y-0 left-0 h-full bg-emerald-600/80 transition-all duration-300 pointer-events-none';
+            }
+            if (text) text.textContent = '✅ 部署完成！';
             showToast(data.msg || `${appName} 就绪！`, true);
           }
-          await fetchStatus();
+          // 视觉反馈后刷新卡片
+          await new Promise(r => setTimeout(r, 1000));
         } else {
+          if (bar) {
+            bar.style.width = '100%';
+            bar.className = 'absolute inset-y-0 left-0 h-full bg-rose-600/80 transition-all duration-300 pointer-events-none';
+          }
+          if (btn) btn.classList.remove('animate-pulse');
+          if (text) text.textContent = '❌ ' + (data.msg || '部署失败');
           showToast(data.msg || '操作失败', false);
+          // 失败展示 2.5 秒后恢复
+          await new Promise(r => setTimeout(r, 2500));
         }
       } catch (err) {
-        showToast(`请求发生异常: ${err}`, false);
-      } finally {
-        isUpdating = false;
-        if (btn) {
-          btn.disabled = false;
-          btn.innerHTML = originalText;
-          btn.className = 'w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center space-x-1.5';
+        pollActive = false;
+        const bar = document.getElementById(`progress-bar-${appName}`);
+        const text = document.getElementById(`progress-text-${appName}`);
+        if (bar) {
+          bar.style.width = '100%';
+          bar.className = 'absolute inset-y-0 left-0 h-full bg-rose-600/80 transition-all duration-300 pointer-events-none';
         }
+        if (btn) btn.classList.remove('animate-pulse');
+        if (text) text.textContent = '❌ 网络请求异常';
+        showToast(`请求发生异常: ${err}`, false);
+        await new Promise(r => setTimeout(r, 2500));
+      } finally {
+        pollActive = false;
+        isUpdating = false;
+        await fetchStatus();
       }
     }
 
