@@ -37,7 +37,7 @@ func RelaunchElevated() error   { return nil }
 func StartService(name string) error {
 	plistPath := getPlistPath(name)
 	if _, err := os.Stat(plistPath); err != nil {
-		return fmt.Errorf("服务配置文件不存在: %v", err)
+		return fmt.Errorf("系统服务尚未注册 (未找到 LaunchAgent 配置文件: %s，请先运行 [7] 注册系统服务)", plistPath)
 	}
 
 	status, err := ServiceStatus(name)

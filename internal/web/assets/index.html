@@ -250,9 +250,15 @@
 
         const pill = document.getElementById('service-status-pill');
         const pillText = document.getElementById('service-status-text');
-        pillText.innerText = isRunning ? '服务运行中' : '服务已停止';
-        pill.className = `flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium border ${isRunning ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-slate-900 text-slate-400 border-slate-800'}`;
-        pill.firstElementChild.className = `w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`;
+        if (data.service_status === '未找到') {
+          pillText.innerText = '服务未注册';
+          pill.className = 'flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium border bg-amber-950/60 text-amber-400 border-amber-800';
+          pill.firstElementChild.className = 'w-2 h-2 rounded-full bg-amber-400';
+        } else {
+          pillText.innerText = isRunning ? '服务运行中' : '服务已停止';
+          pill.className = `flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium border ${isRunning ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-slate-900 text-slate-400 border-slate-800'}`;
+          pill.firstElementChild.className = `w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`;
+        }
 
         // 端口状态
         const portListening = data.listening;
@@ -279,7 +285,8 @@
         if (data.apps && data.apps.length > 0) {
           const appHtml = data.apps.map(app => {
             const hasNewVer = app.needs_update;
-            const isInstalled = app.local_version && app.local_version !== 'unknown';
+            const isInstalled = app.is_installed;
+            const isUnknownVersion = isInstalled && (!app.local_version || app.local_version === 'unknown');
             return `
             <div class="bg-slate-950/70 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-slate-700 transition">
               <div>
@@ -288,18 +295,22 @@
                     <span class="font-bold text-slate-200 text-sm">${app.name}</span>
                     ${app.variant ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/60 font-mono">${app.variant}</span>` : ''}
                   </div>
-                  <span class="text-xs px-2 py-0.5 rounded font-medium ${hasNewVer ? 'bg-amber-950/80 text-amber-300 border border-amber-800/80 animate-pulse' : 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60'}">
-                    ${hasNewVer ? '有可用更新' : (isInstalled ? '已是最新' : '未安装')}
+                  <span class="text-xs px-2 py-0.5 rounded font-medium ${
+                    hasNewVer ? 'bg-amber-950/80 text-amber-300 border border-amber-800/80 animate-pulse' :
+                    (isUnknownVersion ? 'bg-sky-950/60 text-sky-400 border border-sky-800/60' :
+                    (isInstalled ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60' : 'bg-slate-900 text-slate-400 border border-slate-700'))
+                  }">
+                    ${hasNewVer ? '有可用更新' : (isUnknownVersion ? '已安装 (版本未知)' : (isInstalled ? '已是最新' : '未安装'))}
                   </span>
                 </div>
                 <div class="space-y-1.5 text-xs text-slate-400 font-mono bg-slate-900/50 p-2.5 rounded-lg border border-slate-800/50">
                   <div class="flex justify-between">
                     <span class="text-slate-500">本地版本:</span>
-                    <span class="text-slate-200 font-semibold">${app.local_version || '未安装'}</span>
+                    <span class="text-slate-200 font-semibold">${isInstalled ? (isUnknownVersion ? '版本未知' : app.local_version) : '未安装'}</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-slate-500">云端最新:</span>
-                    <span class="${hasNewVer ? 'text-amber-400 font-bold' : 'text-indigo-300'}">${app.remote_version || '未获取'}</span>
+                    <span class="${hasNewVer ? 'text-amber-400 font-bold' : (isInstalled ? 'text-indigo-300' : 'text-emerald-400 font-bold')}">${app.remote_version || '未获取'}</span>
                   </div>
                 </div>
               </div>
@@ -309,15 +320,19 @@
                   <button onclick="updateApp('${app.name}')" id="btn-update-${app.name}" class="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center space-x-1.5">
                     <span>🚀 升级至 ${app.remote_version}</span>
                   </button>
-                ` : `
-                  <span class="text-xs text-emerald-400/90 flex items-center space-x-1">
-                    <span>✓</span>
-                    <span>已处于最新版本</span>
+                ` : (isInstalled ? `
+                  <span class="text-xs ${isUnknownVersion ? 'text-sky-400/90' : 'text-emerald-400/90'} flex items-center space-x-1">
+                    <span>${isUnknownVersion ? 'ℹ' : '✓'}</span>
+                    <span>${isUnknownVersion ? '已安装 (版本未知)' : '已处于最新版本'}</span>
                   </span>
-                  <button onclick="updateApp('${app.name}', true)" id="btn-update-${app.name}" class="text-xs text-slate-500 hover:text-slate-300 underline transition">
-                    重新安装
+                  <button onclick="updateApp('${app.name}', true, false)" id="btn-update-${app.name}" class="text-xs text-slate-400 hover:text-slate-200 underline transition">
+                    ${isUnknownVersion ? '覆盖/更新' : '重新安装'}
                   </button>
-                `}
+                ` : `
+                  <button onclick="updateApp('${app.name}', true, true)" id="btn-update-${app.name}" class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white text-xs font-semibold py-2 px-3 rounded-xl transition shadow-lg shadow-emerald-600/25 flex items-center justify-center space-x-1.5">
+                    <span>📦 立即安装部署至 bin/</span>
+                  </button>
+                `)}
               </div>
             </div>
             `;
@@ -366,12 +381,15 @@
 
     let isUpdating = false;
 
-    async function updateApp(appName, force = false) {
+    async function updateApp(appName, force = false, isInstall = false) {
       if (isUpdating) {
-        showToast('已有正在进行的升级任务，请稍候', false);
+        showToast('已有正在进行的安装/升级任务，请稍候', false);
         return;
       }
-      if (force && !confirm(`确定要重新安装/覆盖 ${appName} 吗？`)) {
+      if (force && !isInstall && !confirm(`确定要重新安装/覆盖 ${appName} 吗？`)) {
+        return;
+      }
+      if (isInstall && !confirm(`确定要将 ${appName} 安装部署至 bin/ 目录吗？`)) {
         return;
       }
 
@@ -380,11 +398,11 @@
       const originalText = btn ? btn.innerHTML : '';
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span>⏳ 正在下载并替换中...</span>';
+        btn.innerHTML = isInstall ? '<span>⏳ 正在下载并安装部署中...</span>' : '<span>⏳ 正在下载并替换中...</span>';
         btn.className = 'w-full bg-slate-800 text-slate-400 text-xs py-2 px-3 rounded-xl flex items-center justify-center cursor-not-allowed';
       }
 
-      showToast(`正在下载并安全替换 ${appName}，请勿关闭页面...`, true);
+      showToast(isInstall ? `正在下载并安装部署 ${appName} 到 bin/ 目录...` : `正在下载并安全替换 ${appName}，请勿关闭页面...`, true);
 
       try {
         const res = await fetch('/api/apps/update', {
@@ -398,14 +416,14 @@
             showToast(data.msg, false);
             alert(data.msg);
           } else {
-            showToast(data.msg || `${appName} 升级成功！`, true);
+            showToast(data.msg || `${appName} 就绪！`, true);
           }
           await fetchStatus();
         } else {
-          showToast(data.msg || '升级失败', false);
+          showToast(data.msg || '操作失败', false);
         }
       } catch (err) {
-        showToast(`升级请求发生异常: ${err}`, false);
+        showToast(`请求发生异常: ${err}`, false);
       } finally {
         isUpdating = false;
         if (btn) {

@@ -194,6 +194,7 @@ type AppInfo struct {
 	RemoteVersion string `json:"remote_version"`
 	Variant       string `json:"variant"`
 	NeedsUpdate   bool   `json:"needs_update"`
+	IsInstalled   bool   `json:"is_installed"`
 }
 
 type StatusResponse struct {
@@ -229,15 +230,20 @@ func getCurrentAppInfos() []AppInfo {
 
 	var result []AppInfo
 	for _, app := range updater.ManagedApps {
-		_, localVer, variant := updater.InspectLocalBinary(app)
+		path, localVer, variant := updater.InspectLocalBinary(app)
+		if localVer == "" && app.Variant != nil {
+			variant = app.Variant("", "")
+		}
 		remoteVer := cacheMap[app.Name]
-		needsUpdate := localVer != "" && localVer != "unknown" && remoteVer != "" && updater.CompareVersions(localVer, remoteVer) < 0
+		isInstalled := path != ""
+		needsUpdate := isInstalled && localVer != "" && localVer != "unknown" && remoteVer != "" && updater.CompareVersions(localVer, remoteVer) < 0
 		result = append(result, AppInfo{
 			Name:          app.Name,
 			LocalVersion:  localVer,
 			RemoteVersion: remoteVer,
 			Variant:       variant,
 			NeedsUpdate:   needsUpdate,
+			IsInstalled:   isInstalled,
 		})
 	}
 	return result
@@ -260,12 +266,14 @@ func getOrFetchAppVersions(force bool) []AppInfo {
 	for _, app := range updater.ManagedApps {
 		status := updater.InspectApp(app)
 		remoteVer := status.Release.TagName
+		isInstalled := status.Path != ""
 		fresh = append(fresh, AppInfo{
 			Name:          app.Name,
 			LocalVersion:  status.LocalVersion,
 			RemoteVersion: remoteVer,
 			Variant:       status.Variant,
 			NeedsUpdate:   status.NeedsUpdate(),
+			IsInstalled:   isInstalled,
 		})
 	}
 
@@ -383,12 +391,17 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	successMsg := fmt.Sprintf("%s 升级成功并已就绪！(%s -> %s)", result.AppName, result.OldVersion, result.NewVersion)
+	if result.OldVersion == "未安装" {
+		successMsg = fmt.Sprintf("%s 部署安装成功并已就绪！(%s)", result.AppName, result.NewVersion)
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":              true,
 		"warning":         false,
 		"service_running": result != nil && result.ServiceRunning,
 		"result":          result,
-		"msg":             fmt.Sprintf("%s 升级成功并已就绪！(%s -> %s)", result.AppName, result.OldVersion, result.NewVersion),
+		"msg":             successMsg,
 	})
 }
 

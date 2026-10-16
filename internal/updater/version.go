@@ -14,7 +14,7 @@ var (
 		regexp.MustCompile(`(?i)\(\s*b?(\d{4,})\s*(?:[,)]|$)`),
 		regexp.MustCompile(`(?i)\bb(\d{4,})\b`),
 	}
-	llamaSwapPattern       = regexp.MustCompile(`(?i)version\s*:\s*v?(\d+)`)
+	llamaSwapPattern       = regexp.MustCompile(`(?i)version\s*:\s*v?(\d+(?:\.\d+)*)`)
 	filenameVersionPattern = regexp.MustCompile(`(?i)(?:b|build|#)(\d{4,})|\b(\d+\.\d+(?:\.\d+)?)\b`)
 	numberPattern          = regexp.MustCompile(`\d+`)
 )

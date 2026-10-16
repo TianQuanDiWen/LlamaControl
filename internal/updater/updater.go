@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"llama-control/internal/config"
 	"llama-control/internal/fsutil"
 	"llama-control/internal/platform"
 )
@@ -151,7 +152,7 @@ func (s AppStatus) NeedsUpdate() bool {
 	return s.Path != "" && s.CheckErr == nil && s.LocalVersion != "" && s.LocalVersion != "unknown" && CompareVersions(s.LocalVersion, s.Release.TagName) < 0
 }
 
-// UpdateManagedApps 执行全局应用更新流程：探测、提示用户、停止服务、下载替换，并恢复服务
+// UpdateManagedApps 执行全局应用更新与安装流程：探测、提示用户、停止服务、下载部署，并恢复服务
 func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 	statuses := make([]AppStatus, 0, len(ManagedApps))
 	for _, app := range ManagedApps {
@@ -160,29 +161,42 @@ func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 		PrintAppStatus(status)
 	}
 
-	if !hasUpdates(statuses) {
-		fmt.Println("没有可用更新。")
+	if !hasUpdatesOrInstalls(statuses) {
+		fmt.Println("所有受管应用均已就绪且处于最新版本。")
 		waitForEnter()
 		return
 	}
-	fmt.Print("是否继续更新? (y/n): ")
+
+	hasUninstalled := false
+	for _, s := range statuses {
+		if s.Path == "" {
+			hasUninstalled = true
+			break
+		}
+	}
+
+	if hasUninstalled {
+		fmt.Print("检测到有尚未安装的应用或可用更新，是否继续安装/更新? (y/n): ")
+	} else {
+		fmt.Print("是否继续更新? (y/n): ")
+	}
 	choice, err := reader.ReadString('\n')
 	if err != nil || !strings.EqualFold(strings.TrimSpace(choice), "y") {
-		fmt.Println("已取消更新。")
+		fmt.Println("已取消操作。")
 		waitForEnter()
 		return
 	}
 
 	serviceWasRunning, statusErr := platform.ServiceRunning(serviceName)
 	if statusErr != nil {
-		fmt.Println("无法确认服务状态，已取消更新:", statusErr)
+		fmt.Println("无法确认服务状态，已取消操作:", statusErr)
 		waitForEnter()
 		return
 	}
 	if serviceWasRunning {
 		fmt.Printf("正在停止 %s 服务以安全更新...\n", serviceName)
 		if err := platform.StopService(serviceName); err != nil {
-			fmt.Println("停止服务失败，已取消更新:", err)
+			fmt.Println("停止服务失败，已取消操作:", err)
 			waitForEnter()
 			return
 		}
@@ -191,14 +205,26 @@ func UpdateManagedApps(reader *bufio.Reader, serviceName string) {
 	}
 
 	for _, status := range statuses {
-		if !status.NeedsUpdate() {
-			continue
-		}
-		fmt.Printf("[更新] %s %s -> %s\n", status.App.Name, status.LocalVersion, status.Release.TagName)
-		if err := InstallRelease(status); err != nil {
-			fmt.Println("  失败:", err)
-		} else {
-			fmt.Println("  完成")
+		if status.Path == "" {
+			if status.CheckErr != nil || status.Release.TagName == "" {
+				fmt.Printf("[跳过] %s 获取云端版本失败: %v\n", status.App.Name, status.CheckErr)
+				continue
+			}
+			fmt.Printf("[首次部署] 正在下载并安装 %s (%s) 到 bin/ 目录...\n", status.App.Name, status.Release.TagName)
+			if err := InstallRelease(status); err != nil {
+				fmt.Println("  失败:", err)
+			} else if err := PostInstallInit(status.App.Name, true); err != nil {
+				fmt.Println("  初始化配置失败:", err)
+			} else {
+				fmt.Println("  完成")
+			}
+		} else if status.NeedsUpdate() {
+			fmt.Printf("[更新] %s %s -> %s\n", status.App.Name, status.LocalVersion, status.Release.TagName)
+			if err := InstallRelease(status); err != nil {
+				fmt.Println("  失败:", err)
+			} else {
+				fmt.Println("  完成")
+			}
 		}
 	}
 	if serviceWasRunning {
@@ -234,7 +260,7 @@ type UpdateResult struct {
 	ServiceError   string `json:"service_error,omitempty"`
 }
 
-// UpdateAppByName 执行指定名称应用的自动更新流程，支持单个应用 (如 "llama-swap" / "llama.cpp")
+// UpdateAppByName 执行指定名称应用的安装/更新流程，支持单个应用 (如 "llama-swap" / "llama.cpp")
 func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateResult, error) {
 	var targetApp *ManagedApp
 	for i := range ManagedApps {
@@ -248,48 +274,68 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 	}
 
 	status := InspectApp(*targetApp)
-	if status.Path == "" {
-		return nil, fmt.Errorf("本地未找到 %s 可执行文件，无法执行更新", targetApp.Name)
-	}
 	if status.CheckErr != nil {
 		return nil, fmt.Errorf("检查最新版本失败: %w", status.CheckErr)
 	}
-	if !force && !status.NeedsUpdate() {
+	if status.Release.TagName == "" {
+		return nil, fmt.Errorf("未能获取到 %s 的最新版本信息", targetApp.Name)
+	}
+
+	isInstall := status.Path == ""
+	if !isInstall && !force && !status.NeedsUpdate() {
 		return nil, fmt.Errorf("%s 当前已是最新版本 (%s)", targetApp.Name, status.LocalVersion)
 	}
 
 	oldVer := status.LocalVersion
+	if oldVer == "" {
+		oldVer = "未安装"
+	}
 	newVer := status.Release.TagName
 
 	isWorker := platform.IsWorkerMode()
 	serviceWasRunning, _ := platform.ServiceRunning(serviceName)
 
-	if isWorker {
-		// 当前在后台服务主进程（Web 控制台）内部：
-		// 仅暂停并关闭 swap 子进程，释放二进制与显卡动态库锁，控制面板保持在线
-		fmt.Printf("[热更新] 正在暂停 %s 子进程并释放文件锁...\n", targetApp.Name)
-		_ = platform.PauseSwapProcess()
-		time.Sleep(200 * time.Millisecond)
-	} else if serviceWasRunning {
-		// 外部独立进程调用：停止外部守护服务
-		fmt.Printf("正在暂停 %s 服务以安全更新 %s...\n", serviceName, targetApp.Name)
-		if err := platform.StopService(serviceName); err != nil {
-			return nil, fmt.Errorf("暂停系统服务失败: %w", err)
+	if !isInstall {
+		if isWorker {
+			// 当前在后台服务主进程（Web 控制台）内部：
+			// 仅暂停并关闭 swap 子进程，释放二进制与显卡动态库锁，控制面板保持在线
+			fmt.Printf("[热更新] 正在暂停 %s 子进程并释放文件锁...\n", targetApp.Name)
+			_ = platform.PauseSwapProcess()
+			time.Sleep(200 * time.Millisecond)
+		} else if serviceWasRunning {
+			// 外部独立进程调用：停止外部守护服务
+			fmt.Printf("正在暂停 %s 服务以安全更新 %s...\n", serviceName, targetApp.Name)
+			if err := platform.StopService(serviceName); err != nil {
+				return nil, fmt.Errorf("暂停系统服务失败: %w", err)
+			}
+			if err := waitForServiceStopped(serviceName, 6*time.Second); err != nil {
+				fmt.Printf("警告: %v，继续尝试更新\n", err)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		if err := waitForServiceStopped(serviceName, 6*time.Second); err != nil {
-			fmt.Printf("警告: %v，继续尝试更新\n", err)
-		}
-		time.Sleep(200 * time.Millisecond)
+		fmt.Printf("[升级执行] 正在升级 %s %s -> %s\n", targetApp.Name, oldVer, newVer)
+	} else {
+		fmt.Printf("[部署执行] 正在全新安装部署 %s (%s) 到 bin/ 目录\n", targetApp.Name, newVer)
 	}
 
-	fmt.Printf("[升级执行] 正在升级 %s %s -> %s\n", targetApp.Name, oldVer, newVer)
 	if err := InstallRelease(status); err != nil {
+		if !isInstall {
+			if isWorker {
+				_ = platform.ResumeSwapProcess()
+			} else if serviceWasRunning {
+				_ = platform.StartService(serviceName)
+			}
+		}
+		return nil, fmt.Errorf("安装部署失败: %w", err)
+	}
+
+	if err := PostInstallInit(targetApp.Name, isInstall); err != nil {
 		if isWorker {
 			_ = platform.ResumeSwapProcess()
 		} else if serviceWasRunning {
 			_ = platform.StartService(serviceName)
 		}
-		return nil, fmt.Errorf("安装更新失败: %w", err)
+		return nil, fmt.Errorf("初始化配置失败: %w", err)
 	}
 
 	result := &UpdateResult{
@@ -319,8 +365,8 @@ func UpdateAppByName(appName string, serviceName string, force bool) (*UpdateRes
 func InspectApp(app ManagedApp) AppStatus {
 	status := AppStatus{App: app}
 	status.Path, status.LocalVersion, status.Variant = InspectLocalBinary(app)
-	if status.Path == "" {
-		return status
+	if status.Path == "" && app.Variant != nil {
+		status.Variant = app.Variant("", "")
 	}
 	status.Release, status.CheckErr = FetchLatestRelease(app)
 	return status
@@ -330,7 +376,15 @@ func InspectApp(app ManagedApp) AppStatus {
 func PrintAppStatus(status AppStatus) {
 	fmt.Printf("\n[%s]\n", status.App.Name)
 	if status.Path == "" {
-		fmt.Println("  本地未找到可执行文件")
+		fmt.Println("  本地状态: 未安装")
+		if status.Variant != "" {
+			fmt.Println("  构建分支:", platform.FormatVariant(status.Variant), "(根据环境匹配)")
+		}
+		if status.CheckErr != nil {
+			fmt.Println("  最新版本: 获取失败:", status.CheckErr)
+		} else if status.Release.TagName != "" {
+			fmt.Println("  最新版本:", status.Release.TagName)
+		}
 		return
 	}
 	fmt.Println("  本地版本:", status.LocalVersion)
@@ -345,10 +399,10 @@ func PrintAppStatus(status AppStatus) {
 	fmt.Println("  需要更新:", status.NeedsUpdate())
 }
 
-// hasUpdates 遍历状态数组判定是否至少存在一个应用需要更新
-func hasUpdates(statuses []AppStatus) bool {
+// hasUpdatesOrInstalls 遍历状态数组判定是否至少存在一个应用需要更新或尚未安装
+func hasUpdatesOrInstalls(statuses []AppStatus) bool {
 	for _, status := range statuses {
-		if status.NeedsUpdate() {
+		if status.Path == "" || status.NeedsUpdate() {
 			return true
 		}
 	}
@@ -417,6 +471,66 @@ func BinaryVersionOutput(path string) string {
 	return ""
 }
 
+// DefaultInstallDir 返回受管应用默认的安装目录（统一放在 bin/ 目录，保持根目录纯净）
+func DefaultInstallDir() string {
+	return filepath.Join(platform.ExecutableDir(), "bin")
+}
+
+// PostInstallInit 在应用安装成功后执行必要的初始化工作（如首次全新安装 llama-swap 时初始化配置）
+func PostInstallInit(appName string, isInstall bool) error {
+	if appName != "llama-swap" || !isInstall {
+		return nil
+	}
+	exeDir := platform.ExecutableDir()
+	candidateDirs := platform.ConfigCandidateDirs(exeDir, filepath.Join(exeDir, "bin"))
+	return EnsureBootstrapConfig(exeDir, candidateDirs...)
+}
+
+// EnsureBootstrapConfig 仅在所有候选目录均无任何配置文件时，在目标目录初始化生成标准的 config.yaml 初始配置与 models 目录
+func EnsureBootstrapConfig(dir string, candidateDirs ...string) error {
+	checkDirs := append([]string{dir}, candidateDirs...)
+	loc := config.ResolveSwapConfig(checkDirs...)
+	if loc.Found {
+		return nil // 任何候选目录下已有配置文件，严禁生成新配置抢占用户配置
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	modelsDir := filepath.Join(dir, "models")
+	_ = os.MkdirAll(modelsDir, 0755)
+
+	template := `# llama-swap 初始配置文件
+# 由 llama-control 自动生成
+port: 8080
+
+healthCheckTimeout: 120
+logLevel: info
+logToStdout: "proxy"
+
+metricsMaxInMemory: 1000
+startPort: 5800
+sendLoadingState: true
+globalTTL: 300
+
+macros:
+  latest-llama: >
+    llama-server
+    --port ${PORT}
+  default_ctx: 4096
+  models_dir: "models"
+
+models:
+  # 示例配置（将 GGUF 模型放置于 models/ 目录后取消注释启用）：
+  # "demo-model":
+  #   cmd: |
+  #     ${latest-llama}
+  #     --model ${models_dir}/your-model.gguf
+  #     --ctx-size ${default_ctx}
+  #     --gpu-layers 999
+  #   ttl: 300
+`
+	return os.WriteFile(configPath, []byte(template), 0644)
+}
+
 // InstallRelease 处理特定应用的下载、解包以及原目录原子替换验证
 func InstallRelease(status AppStatus) error {
 	asset, ok := SelectReleaseAsset(status.Release.Assets, status.App, status.Variant, runtime.GOOS, runtime.GOARCH)
@@ -441,13 +555,22 @@ func InstallRelease(status AppStatus) error {
 		return err
 	}
 	fmt.Println("  资源:", asset.Name)
-	return fsutil.ReplacePackageSafely(filepath.Dir(updated), filepath.Dir(status.Path), filepath.Base(updated), func(path string) error {
+
+	targetDir := filepath.Dir(status.Path)
+	if status.Path == "" {
+		targetDir = DefaultInstallDir()
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("创建安装目录失败: %w", err)
+	}
+
+	return fsutil.ReplacePackageSafely(filepath.Dir(updated), targetDir, filepath.Base(updated), func(path string) error {
 		v := status.App.Parse(BinaryVersionOutput(path))
 		if v == "" {
-			return fmt.Errorf("更新后无法读取版本")
+			return fmt.Errorf("安装/更新后无法读取版本")
 		}
 		if CompareVersions(v, status.Release.TagName) != 0 {
-			return fmt.Errorf("更新后版本为 %s，预期 %s", v, status.Release.TagName)
+			return fmt.Errorf("安装/更新后版本为 %s，预期 %s", v, status.Release.TagName)
 		}
 		return nil
 	})

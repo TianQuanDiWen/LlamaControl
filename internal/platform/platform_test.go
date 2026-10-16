@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -79,4 +80,31 @@ func TestRestartSwapProcess(t *testing.T) {
 	workerStateMu.Lock()
 	swapRestarting = false
 	workerStateMu.Unlock()
+}
+
+func TestConfigCandidateDirs(t *testing.T) {
+	exeDir := filepath.Clean("/test/root")
+	appDir := filepath.Clean("/test/root/bin")
+
+	dirs := ConfigCandidateDirs(exeDir, appDir)
+	if len(dirs) < 2 {
+		t.Fatalf("expected at least 2 dirs, got %d", len(dirs))
+	}
+	if dirs[0] != exeDir {
+		t.Errorf("expected first dir to be exeDir %q, got %q", exeDir, dirs[0])
+	}
+	if dirs[1] != filepath.Join(exeDir, "bin") {
+		t.Errorf("expected second dir to be bin dir %q, got %q", filepath.Join(exeDir, "bin"), dirs[1])
+	}
+
+	// 验证去重：appDir 就是 exeDir/bin 时不应出现连续重复
+	count := 0
+	for _, d := range dirs {
+		if strings.EqualFold(d, filepath.Join(exeDir, "bin")) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 instance of bin dir due to deduplication, got %d", count)
+	}
 }

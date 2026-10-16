@@ -173,3 +173,65 @@ func TestUpdateAppByName_NotFound(t *testing.T) {
 	}
 }
 
+func TestDefaultInstallDir(t *testing.T) {
+	dir := DefaultInstallDir()
+	if filepath.Base(dir) != "bin" {
+		t.Errorf("expected DefaultInstallDir to end in 'bin', got: %s", dir)
+	}
+}
+
+func TestEnsureBootstrapConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	if err := EnsureBootstrapConfig(tmpDir); err != nil {
+		t.Fatalf("unexpected error creating bootstrap config: %v", err)
+	}
+
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	content, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("expected config.yaml to exist: %v", err)
+	}
+
+	if !strings.Contains(string(content), "port: 8080") {
+		t.Errorf("expected default port 8080 in config.yaml")
+	}
+	if !strings.Contains(string(content), "latest-llama") {
+		t.Errorf("expected latest-llama macro in config.yaml")
+	}
+
+	modelsDir := filepath.Join(tmpDir, "models")
+	if info, err := os.Stat(modelsDir); err != nil || !info.IsDir() {
+		t.Errorf("expected models directory to be created")
+	}
+
+	// 验证候选目录存在配置时，绝不在 targetDir 生成新的配置进行抢占
+	targetDir := filepath.Join(tmpDir, "new_target")
+	candidateDir := filepath.Join(tmpDir, "existing_candidate")
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(candidateDir, 0755)
+	_ = os.WriteFile(filepath.Join(candidateDir, "config.yml"), []byte("port: 7070\n"), 0644)
+
+	if err := EnsureBootstrapConfig(targetDir, candidateDir); err != nil {
+		t.Fatalf("EnsureBootstrapConfig returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "config.yaml")); err == nil {
+		t.Errorf("EnsureBootstrapConfig created config.yaml in targetDir despite existing config in candidateDir")
+	}
+}
+
+func TestHasUpdatesOrInstalls(t *testing.T) {
+	uninstalled := []AppStatus{
+		{Path: ""},
+	}
+	if !hasUpdatesOrInstalls(uninstalled) {
+		t.Errorf("expected uninstalled app to require update or install")
+	}
+
+	upToDate := []AppStatus{
+		{Path: "bin/llama-swap.exe", LocalVersion: "v1.0.0", Release: GithubRelease{TagName: "v1.0.0"}},
+	}
+	if hasUpdatesOrInstalls(upToDate) {
+		t.Errorf("expected up to date app not to require update or install")
+	}
+}

@@ -115,21 +115,63 @@ func ParseSwapLogDir(content []byte) (string, bool) {
 	return "", false
 }
 
-// DetectSwapPort 在给定的候选目录中寻找 config.yaml / config.yml，若找不到则返回官方默认端口 8080 和 "config.yaml"
-func DetectSwapPort(dirs ...string) (int, string) {
+// SwapConfigLocation 记录探测到的 llama-swap 配置文件路径及环境元信息
+type SwapConfigLocation struct {
+	ConfigFile     string // 配置文件的绝对路径
+	ConfigFileName string // 配置文件基准名称 (config.yaml 或 config.yml)
+	WorkDir        string // 配置文件所在的目录绝对路径（以此作为工作目录运行）
+	Port           int    // 监听端口（默认 8080）
+	Found          bool   // 是否在候选目录中真实找到了配置文件
+}
+
+// ResolveSwapConfig 在候选目录中按顺序检索 config.yaml 或 config.yml，统一返回绝对路径及对应工作目录。
+// 若所有目录均未找到，以首个有效候选目录（或当前目录）作为工作目录，返回默认的 8080 端口与 config.yaml 默认路径。
+func ResolveSwapConfig(dirs ...string) SwapConfigLocation {
+	var fallbackDir string
 	for _, dir := range dirs {
 		if dir == "" {
 			continue
 		}
+		if fallbackDir == "" {
+			fallbackDir = dir
+		}
 		for _, name := range []string{"config.yaml", "config.yml"} {
-			if content, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
-				if port, ok := ParseSwapPort(content); ok {
-					return port, name
+			cfgPath := filepath.Join(dir, name)
+			if content, err := os.ReadFile(cfgPath); err == nil {
+				port := 8080
+				if p, ok := ParseSwapPort(content); ok {
+					port = p
+				}
+				absCfg, _ := filepath.Abs(cfgPath)
+				absDir, _ := filepath.Abs(dir)
+				return SwapConfigLocation{
+					ConfigFile:     absCfg,
+					ConfigFileName: name,
+					WorkDir:        absDir,
+					Port:           port,
+					Found:          true,
 				}
 			}
 		}
 	}
-	return 8080, "config.yaml"
+
+	if fallbackDir == "" {
+		fallbackDir = "."
+	}
+	absWorkDir, _ := filepath.Abs(fallbackDir)
+	return SwapConfigLocation{
+		ConfigFile:     filepath.Join(absWorkDir, "config.yaml"),
+		ConfigFileName: "config.yaml",
+		WorkDir:        absWorkDir,
+		Port:           8080,
+		Found:          false,
+	}
+}
+
+// DetectSwapPort 在给定的候选目录中寻找 config.yaml / config.yml，若找不到则返回官方默认端口 8080 和 "config.yaml"
+func DetectSwapPort(dirs ...string) (int, string) {
+	loc := ResolveSwapConfig(dirs...)
+	return loc.Port, loc.ConfigFileName
 }
 
 // DetectSwapLogDir 尝试从配置文件中读取日志目录配置

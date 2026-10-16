@@ -28,6 +28,34 @@ func ExecutableDir() string {
 	return dir
 }
 
+// ConfigCandidateDirs 返回检索 llama-swap 配置文件的统一候选目录列表，
+// 保证安装初始化、守护进程启动及 CLI 探测使用完全一致的候选目录顺序。
+func ConfigCandidateDirs(exeDir, appDir string) []string {
+	seen := make(map[string]bool)
+	var dirs []string
+	add := func(d string) {
+		if d == "" {
+			return
+		}
+		clean := filepath.Clean(d)
+		key := strings.ToLower(clean)
+		if !seen[key] {
+			seen[key] = true
+			dirs = append(dirs, clean)
+		}
+	}
+
+	add(exeDir)
+	if exeDir != "" {
+		add(filepath.Join(exeDir, "bin"))
+	}
+	add(appDir)
+	for _, d := range DefaultDirs() {
+		add(d)
+	}
+	return dirs
+}
+
 // StreamCommand 执行命令并将标准输出/标准错误重定向到当前终端
 func StreamCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
@@ -66,7 +94,7 @@ func DetectLlamaCppVariant(path, output string) string {
 	case strings.Contains(text, "vulkan"):
 		return "vulkan"
 	default:
-		return ""
+		return InstalledCUDAVariant()
 	}
 }
 
@@ -194,6 +222,7 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 		var candidates []string
 		for _, name := range ExecutableNames("llama-swap") {
 			candidates = append(candidates, filepath.Join(exeDir, name))
+			candidates = append(candidates, filepath.Join(exeDir, "bin", name))
 			candidates = append(candidates, filepath.Join(filepath.Dir(exeDir), name))
 			for _, dir := range DefaultDirs() {
 				candidates = append(candidates, filepath.Join(dir, name))
@@ -215,25 +244,19 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 		}
 		appDir := filepath.Dir(swapPath)
 
-		var configFile string
-		var port int
-		
-		// 动态检测端口和配置文件
-		if p, cfgName := config.DetectSwapPort(appDir); p > 0 {
-			port = p
-			configFile = cfgName
-		} else {
-			port = 8080
-			configFile = "config.yaml"
-		}
+		// 确定根工作目录与配置文件：统一使用 config.ResolveSwapConfig 在候选目录中寻找 config.yaml 或 config.yml
+		cfgLoc := config.ResolveSwapConfig(ConfigCandidateDirs(exeDir, appDir)...)
+		workDir := cfgLoc.WorkDir
+		configFile := cfgLoc.ConfigFile
+		port := cfgLoc.Port
 
 		// 动态检测日志目录，保持守护进程与CLI一致，且强制基准化为绝对路径
-		logDir := filepath.Join(appDir, "logs")
-		if dir, ok := config.DetectSwapLogDir(appDir, exeDir); ok && dir != "" {
+		logDir := filepath.Join(workDir, "logs")
+		if dir, ok := config.DetectSwapLogDir(workDir, appDir, exeDir); ok && dir != "" {
 			if filepath.IsAbs(dir) {
 				logDir = dir
 			} else {
-				logDir = filepath.Join(appDir, dir)
+				logDir = filepath.Join(workDir, dir)
 			}
 		}
 		_ = os.MkdirAll(logDir, 0755)
@@ -276,7 +299,11 @@ func runServiceWorker(serviceName string, hooks ...WorkerHook) {
 
 			runCtx, runCancel := context.WithCancel(ctx)
 			cmd := exec.CommandContext(runCtx, swapPath, "-config", configFile, "-listen", fmt.Sprintf(":%d", port))
-			cmd.Dir = appDir
+			cmd.Dir = workDir
+			binDir := filepath.Join(exeDir, "bin")
+			pathEnv := os.Getenv("PATH")
+			pathSep := string(os.PathListSeparator)
+			cmd.Env = append(os.Environ(), "PATH="+binDir+pathSep+exeDir+pathSep+pathEnv)
 			cmd.Stdout = dailyLogger
 			cmd.Stderr = dailyLogger
 			workerStateMu.Lock()

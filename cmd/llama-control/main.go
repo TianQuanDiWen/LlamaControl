@@ -141,10 +141,29 @@ func showMenu() {
 		}
 		switch strings.TrimSpace(choice) {
 		case "1":
+			if status, err := platform.ServiceStatus(serviceName); err == nil && status == "未找到" {
+				fmt.Printf("检测到系统服务 %s 尚未注册。\n", serviceName)
+				fmt.Print("是否立即进行服务注册向导? (y/n): ")
+				c, _ := reader.ReadString('\n')
+				if strings.EqualFold(strings.TrimSpace(c), "y") {
+					manageService(reader)
+					break
+				}
+			}
 			runServiceAction("启动", platform.StartService)
 		case "2":
+			if status, err := platform.ServiceStatus(serviceName); err == nil && status == "未找到" {
+				fmt.Printf("系统服务 %s 尚未注册。\n", serviceName)
+				waitForEnter()
+				break
+			}
 			runServiceAction("停止", platform.StopService)
 		case "3":
+			if status, err := platform.ServiceStatus(serviceName); err == nil && status == "未找到" {
+				fmt.Printf("系统服务 %s 尚未注册。\n", serviceName)
+				waitForEnter()
+				break
+			}
 			runServiceAction("重启", platform.RestartService)
 		case "4":
 			showStatus()
@@ -243,18 +262,25 @@ func showStatus() {
 	waitForEnter()
 }
 
-// detectSwapPort 根据可执行文件所在路径自动探测配置文件的监听端口
-func detectSwapPort() (int, string) {
-	dirs := []string{platform.ExecutableDir()}
+// detectSwapConfig 根据可执行文件所在路径自动探测配置文件的绝对路径、工作目录与端口
+func detectSwapConfig() config.SwapConfigLocation {
+	exeDir := platform.ExecutableDir()
+	var appDir string
 	for _, app := range updater.ManagedApps {
 		if app.Name == "llama-swap" {
 			if path, _, _ := updater.InspectLocalBinary(app); path != "" {
-				dirs = append(dirs, filepath.Dir(path))
+				appDir = filepath.Dir(path)
 			}
 			break
 		}
 	}
-	return config.DetectSwapPort(dirs...)
+	return config.ResolveSwapConfig(platform.ConfigCandidateDirs(exeDir, appDir)...)
+}
+
+// detectSwapPort 根据可执行文件所在路径自动探测配置文件的监听端口及绝对路径
+func detectSwapPort() (int, string) {
+	loc := detectSwapConfig()
+	return loc.Port, loc.ConfigFile
 }
 
 func getLogDir(exeDir string) string {
@@ -289,12 +315,28 @@ func manageService(reader *bufio.Reader) {
 				break
 			}
 		}
-		if swapPath != "" {
-			appDir := filepath.Dir(swapPath)
-			port, configFile := config.DetectSwapPort(appDir)
-			return swapPath, appDir, port, configFile
+		if swapPath == "" {
+			fmt.Print("检测到尚未安装 llama-swap。是否立即下载并一键安装部署至 bin/ 目录? (y/n): ")
+			choice, _ := reader.ReadString('\n')
+			if strings.EqualFold(strings.TrimSpace(choice), "y") {
+				if _, err := updater.UpdateAppByName("llama-swap", serviceName, true); err != nil {
+					fmt.Println("部署 llama-swap 失败:", err)
+					return "", "", 0, "config.yaml"
+				}
+				for _, app := range updater.ManagedApps {
+					if app.Name == "llama-swap" {
+						swapPath, _, _ = updater.InspectLocalBinary(app)
+						break
+					}
+				}
+			}
 		}
-		return "", "", 0, "config.yaml"
+		if swapPath != "" {
+			exeDir := platform.ExecutableDir()
+			cfgLoc := config.ResolveSwapConfig(platform.ConfigCandidateDirs(exeDir, filepath.Dir(swapPath))...)
+			return swapPath, cfgLoc.WorkDir, cfgLoc.Port, cfgLoc.ConfigFile
+		}
+		return "", "", 0, filepath.Join(platform.ExecutableDir(), "config.yaml")
 	})
 	waitForEnter()
 }

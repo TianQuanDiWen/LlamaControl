@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -104,5 +105,58 @@ func TestSwapConfig_PortTypes(t *testing.T) {
 	cfgString := SwapConfig{PortRaw: "7777"}
 	if p, ok := cfgString.EffectivePort(); !ok || p != 7777 {
 		t.Fatalf("string port failed: %d, %v", p, ok)
+	}
+}
+
+func TestResolveSwapConfig(t *testing.T) {
+	tmpRoot := t.TempDir()
+	exeDir := filepath.Join(tmpRoot, "control")
+	appDir := filepath.Join(tmpRoot, "control", "bin")
+	_ = os.MkdirAll(exeDir, 0755)
+	_ = os.MkdirAll(appDir, 0755)
+
+	// 1. 当任何目录都没有配置时，回退到首个候选目录，Found 为 false
+	locFallback := ResolveSwapConfig(exeDir, appDir)
+	if locFallback.Found {
+		t.Errorf("expected Found == false, got true")
+	}
+	if locFallback.Port != 8080 || locFallback.ConfigFileName != "config.yaml" {
+		t.Errorf("expected fallback 8080/config.yaml, got %d/%s", locFallback.Port, locFallback.ConfigFileName)
+	}
+	expectedExeDir, _ := filepath.Abs(exeDir)
+	if locFallback.WorkDir != expectedExeDir {
+		t.Errorf("expected WorkDir %s, got %s", expectedExeDir, locFallback.WorkDir)
+	}
+
+	// 2. 模拟旧安装：根目录无配置，仅在 appDir 下存在 config.yml
+	ymlPath := filepath.Join(appDir, "config.yml")
+	_ = os.WriteFile(ymlPath, []byte("port: 9090\n"), 0644)
+
+	locYml := ResolveSwapConfig(exeDir, appDir)
+	if !locYml.Found {
+		t.Errorf("expected Found == true")
+	}
+	if locYml.Port != 9090 || locYml.ConfigFileName != "config.yml" {
+		t.Errorf("expected 9090/config.yml, got %d/%s", locYml.Port, locYml.ConfigFileName)
+	}
+	expectedAppDir, _ := filepath.Abs(appDir)
+	if locYml.WorkDir != expectedAppDir {
+		t.Errorf("expected WorkDir to resolve to appDir %s, got %s", expectedAppDir, locYml.WorkDir)
+	}
+	expectedYmlPath, _ := filepath.Abs(ymlPath)
+	if locYml.ConfigFile != expectedYmlPath {
+		t.Errorf("expected ConfigFile %s, got %s", expectedYmlPath, locYml.ConfigFile)
+	}
+
+	// 3. 根目录存在 config.yaml 时，优先使用根目录工作目录及配置文件
+	yamlPath := filepath.Join(exeDir, "config.yaml")
+	_ = os.WriteFile(yamlPath, []byte("port: 11451\n"), 0644)
+
+	locYaml := ResolveSwapConfig(exeDir, appDir)
+	if !locYaml.Found || locYaml.Port != 11451 || locYaml.ConfigFileName != "config.yaml" {
+		t.Errorf("expected 11451/config.yaml, got %d/%s", locYaml.Port, locYaml.ConfigFileName)
+	}
+	if locYaml.WorkDir != expectedExeDir {
+		t.Errorf("expected WorkDir to resolve to exeDir %s, got %s", expectedExeDir, locYaml.WorkDir)
 	}
 }

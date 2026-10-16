@@ -11,6 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"llama-control/internal/platform"
+	"llama-control/internal/updater"
 )
 
 func TestWebRootHandler(t *testing.T) {
@@ -261,3 +265,80 @@ func TestStaticCssAndHtmlOffline(t *testing.T) {
 	}
 }
 
+func TestAppInfo_InstalledUnknownVersion(t *testing.T) {
+	// 验证当可执行文件路径存在但版本未知 (unknown) 时，Web /api/status 响应中的 is_installed 必须为 true，且 needs_update 为 false
+	tmpDir := t.TempDir()
+	binName := "mock-unknown-tool"
+	for _, name := range platform.ExecutableNames(binName) {
+		fakeExe := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(fakeExe, []byte("echo unknown"), 0755); err != nil {
+			t.Fatalf("failed to create fake binary: %v", err)
+		}
+	}
+
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	origApps := updater.ManagedApps
+	defer func() {
+		updater.ManagedApps = origApps
+	}()
+
+	updater.ManagedApps = []updater.ManagedApp{
+		{
+			Name:       "mock-tool",
+			BinaryBase: binName,
+			Parse:      func(string) string { return "" },
+		},
+	}
+
+	// 模拟远程存在新版本（例如 v2.0.0），确保不会因为未知版本而误判为 needs_update 或未安装
+	appCacheMu.Lock()
+	appCacheList = []AppInfo{
+		{
+			Name:          "mock-tool",
+			RemoteVersion: "v2.0.0",
+		},
+	}
+	appCacheTime = time.Now()
+	appCacheMu.Unlock()
+	defer func() {
+		appCacheMu.Lock()
+		appCacheList = nil
+		appCacheTime = time.Time{}
+		appCacheMu.Unlock()
+	}()
+
+	server := NewServer(Config{
+		ServiceName: "test-service",
+		SwapPort:    8080,
+		Addr:        "127.0.0.1:0",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w := httptest.NewRecorder()
+	server.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp StatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse /api/status response: %v", err)
+	}
+
+	if len(resp.Apps) != 1 {
+		t.Fatalf("expected 1 app in status response, got %d", len(resp.Apps))
+	}
+
+	app := resp.Apps[0]
+	if !app.IsInstalled {
+		t.Errorf("expected is_installed to be true for detected binary with unknown version, got false")
+	}
+	if app.LocalVersion != "unknown" {
+		t.Errorf("expected local_version to be 'unknown', got %q", app.LocalVersion)
+	}
+	if app.NeedsUpdate {
+		t.Errorf("expected needs_update to be false when version is unknown, got true")
+	}
+}
